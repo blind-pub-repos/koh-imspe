@@ -1,0 +1,2635 @@
+---
+title: "Active Learning for Simulator Calibration"
+date: "`r format(Sys.time(), '%d %B, %Y')`"
+output: 
+  bookdown::pdf_document2:
+    number_sections: true
+    toc: false
+    keep_tex: true
+    citation_package: natbib
+    extra_dependencies:
+      float:  null
+      babel:  ["english"]
+      cancel: null
+      #showkeys: null
+#bibliography: "pubdocs/bib.bib"
+#csl: "pubdocs/chicago-author-date.csl"
+biblio-style: apalike
+#biblio-style: authoryear
+link-citations: true
+#biblatexoptions: uniquename=false
+editor_options: 
+  markdown: 
+    wrap: 72
+header-includes:
+    - \usepackage{setspace}
+    - \doublespacing
+    - \pdfminorversion=4
+---
+
+```{r setup, echo = FALSE, message  = FALSE, warning = FALSE}
+library(laGP)
+library(plgp)
+library(lhs)
+library(hetGP)
+library(geometry)
+library(knitr)
+library(kableExtra)
+knitr::opts_chunk$set(fig.pos = "ht!", out.extra = "")
+
+### Most recent data file names
+sinusoid.experiment <- "11-18-2022-sinusoid-1000reps.RData"
+surrogatesHW.experiment <- "04-07-2022-surrogates-100reps-appended.RData"
+sx.experiment1 <- "2022-11-14-sx-200-reps-appended.RData"
+sx.experiment2 <- "2022-11-19-sx-200-reps-appended.RData"
+sx.experiment3 <- "2022-12-04-sx-100-reps-appended.RData"
+
+if(Sys.info()[4] == "scott-XPS-15-9560" || Sys.info()[4] %in% c("rhudaur", "rivendell")){
+  opts_chunk$set(cache.path = "~/Documents/gramacy_lab/KOHdesign/pubdocs/cache/")
+  opts_chunk$set(fig.path = "~/Documents/gramacy_lab/KOHdesign/pubdocs/figs/")
+  
+  ### Set the path for the sinusoid experiment data file
+  load(paste("exp/1d-sinusoid/",sinusoid.experiment, sep = "")) 
+  sinusoid.data <- performance.list
+  
+  ## Set the path for the surrogates ch8 problem 2 experiment
+  load(paste("exp/surrogates-ch8p2/",surrogatesHW.experiment, sep =""))
+  surrogatesHW.data <- performance.list
+  
+  ## Set the path for the real SX application
+  load(paste("exp/sx/", sx.experiment1, sep =""))
+  sx.data1 <- performance.list
+  load(paste("exp/sx/", sx.experiment2, sep =""))
+  sx.data2 <- performance.list
+  load(paste("exp/sx/", sx.experiment3, sep =""))
+  sx.data3 <- performance.list
+  
+}else if(Sys.info()[4] %in% c("Scotts-MacBook-Pro-2.local", "Scotts-MBP", "Scotts-MacBook-Pro.local", "DESKTOP-RFPNN23")){
+  
+  opts_chunk$set(cache.path = "~/Documents/gramacy-lab/KOHdesign/pubdocs/cache/")
+  opts_chunk$set(fig.path = "~/Documents/gramacy-lab/KOHdesign/pubdocs/figs/")
+  
+  ### Set the path for the sinusoid experiment data file
+  load(paste("exp/1d-sinusoid/",sinusoid.experiment, sep = "")) 
+  sinusoid.data <- performance.list
+  
+  ## Set the path for the surrogates ch8 problem 2 experiment
+  load(paste("exp/surrogates-ch8p2/",surrogatesHW.experiment, sep =""))
+  surrogatesHW.data <- performance.list
+  
+  ## Set the path for the real SX application
+  load(paste("exp/sx/", sx.experiment1, sep =""))
+  sx.data1 <- performance.list
+  load(paste("exp/sx/", sx.experiment2, sep =""))
+  sx.data2 <- performance.list
+  load(paste("exp/sx/", sx.experiment3, sep =""))
+  sx.data3 <- performance.list
+  
+}else if(Sys.info()[4] == "some_system"){
+  
+  stop("Set cache and figure path for your system in first Rmd code chunk")
+  
+
+}else{
+    stop("Set cache and figure path for your system in first Rmd code chunk")
+  }
+
+
+eps <- sqrt(.Machine$double.eps)
+```
+
+```{=tex}
+\begin{abstract}
+
+The Kennedy and O'Hagan (KOH) calibration framework uses coupled Gaussian
+processes (GPs) to meta-model an expensive simulator (first GP), tune its
+"knobs" (calibration inputs) to best match observations from a real
+physical/field experiment and correct for any modeling bias (second GP) when
+predicting under novel field conditions (design inputs). There are
+well-established methods for placement of design inputs for data-efficient
+planning of a simulation campaign in isolation, i.e., without field data:
+space-filling, or via criteria like minimum integrated
+mean-squared prediction error (IMSPE). Analogues within the coupled GP KOH
+framework are mostly absent from the literature. 
+Here we derive a novel, closed form IMSPE
+criteria for sequentially acquiring new simulator data in an active learning
+setting for KOH.  We illustrate how acquisitions space-fill in design space,
+but concentrate in calibration space. Closed form IMSPE precipitates a
+closed-form gradient for efficient numerical optimization.  We 
+demonstrate that such acquisitions lead to a more efficient
+simulation campaign on benchmark problems, and conclude with a showcase on a
+motivating problem involving prediction of equilibrium concentrations of rare
+earth elements for a liquid-liquid extraction reaction.
+
+\end{abstract}
+```
+
+***Keywords:*** Gaussian Processes, Integrated Mean Squared Prediction Error, Kennedy and O'Hagan
+
+# Introduction
+
+Computer simulation experiments calibrated to real world observations
+can assist in the understanding of complex systems. Examples include
+biofilm formation [@johnson:2008], radiative shock hydrodynamics
+[@goh2013prediction], and the design of turbines [@Huang:2018]. The
+canonical apparatus in this setting is due to Kennedy and O'Hagan [KOH,
+@kennedy2001bayesian]. KOH models field-data from a physical system as
+the function of a computer simulation plus an additional bias
+correction (see our review in \S\@ref(koh)). Computer models are biased
+because they idealize physical dynamics and can have more dials or
+knobs, so-called *calibration parameters*, than can be
+controlled in the field. So KOH must juggle competing aims: furnish
+accurate, bias-corrected prediction for the real process in novel
+experimental conditions (i.e., design inputs, shared by both the
+physical/field apparatus and the computer simulation) while at the same
+time tuning good settings of calibration parameters. Moreover, limited
+simulation and field data necessitate meta-modeling. Toward this end,
+coupled Gaussian processes [GPs, @williams2006gaussian] are used as a
+surrogate [@gramacy2020surrogates] for novel simulation, and to learn an
+appropriate bias correction.  
+
+This is hard to do, and in fact there are many recent papers that
+suggest that confounding between GP bias correction, GP surrogate, and
+tuning parameters creates an identification hazard
+[@bayarri2009modularization; @Higdon:2004; @bryn2014learning;
+@plumlee2017bayesian; @gu2018jointly; @tuo2015; @tuo2016; @wong2017;
+@plumlee2019]. Nevertheless, the apparatus has proved highly useful for
+prediction. We thus take the framework as it is and focus our efforts
+here on data collection for efficient learning. Both experiments, field
+and simulated, must be carefully designed and modeled to make the most
+of limited resources.
+
+Taken in isolation, the design for GP surrogates has a rich literature.
+Recipes range from purely random to geometric space-fillingness, such as
+via Latin-Hypercube sampling [LHS, @mckay2000comparison] and minimax
+designs [@johnson1990minimax]. Closed form analytics from GP posterior
+quantities (again see \S\@ref(koh)) may be leveraged to design optimality
+criteria, such as via maximum entropy or minimum integrated mean-squared
+prediction error (IMSPE), to develop designs [@sacks1989design]. These
+ideas may be applied as one-shot, allocating runs all at once, or
+sequentially via active learning [@seo2000gaussian], which can offer an
+efficient approximation to the one-shot approach due to submodularity
+[@wei2015submodularity] properties while hedging against parametric
+specification of any (re-) estimated or fixed quantities. This
+active/sequential approach is generally preferred when possible.
+Ultimately the result is space-filling when variance/information
+criteria are measured globally in the input space. For a more thorough
+review see, e.g., @gramacy2020surrogates \S4--\S6.
+
+Specifically within the coupled-GP KOH calibration framework, literature on
+simulation design for improved field prediction is more limited. Most are
+one-shot or are focused on field design rather than computer model
+acquisition. @leatherman2017designing built minimum IMSPE designs for combined
+field and simulation data.
+@arendt2016preposterior used pre-posterior analysis to improve
+identification via space-filling criteria. @krishna2021robust proposed
+one-shot designs for physical experimentation that is robust to modeling choices
+for bias correction. @williams2011batch explored entropy and
+distance-based criteria in an active learning setting for the field
+experiment. @morris2015physical similarly studied the selection of new
+field data sites, but in support of computer model development. None of
+these address a scenario where (new) field measurement is
+difficult/impossible, but new simulations can be run.
+
+@ranjan2011follow provide some insight along those lines, comparing reduction
+in field data IMSPE for surrogate-only designs. They found that new batches of
+simulations should involve design inputs closely aligned with field data,
+paired with random calibration input settings. They stopped short of offering
+an automatable recipe for choosing new acquisitions for simulation across both
+spaces simultaneously. Possibly this is because they did not have a
+closed form criteria that could easily be searched for new acquisitions.  More
+recently, @chen2022apik considered quadrature-based IMSPE in a setup similar
+to KOH, but for coupled gradients.  Lack of a closed form IMSPE
+necessitated candidate-based, discrete optimization.
+
+Although similar analytic expressions for IMSPE have been developed in
+related contexts [e.g., @leatherman2017designing;
+@binois2019replication; @wycoff2021jcgs], we are unaware of any
+targeting computer model runs for improved KOH prediction. One advantage
+of having a closed form, as opposed to using quadrature or Monte Carlo
+integration, is that derivatives can reduce the computation time required in the search for an optimal new acquisition.  We additionally provide those in closed form so that finite differencing is not required.
+
+Using our KOH-based IMSPE criterion, we reveal novel insights about which
+additional simulations lead to improved prediction. Rather than "matching"
+field data design inputs and being "random" on calibration parameters
+[@ranjan2011follow], we show that our criterion prefers new runs in the
+vicinity of, but not too close to, calibration parameter estimates, while
+exploring the remainder of the parameter space.  In other words, KOH-IMSPE
+prefers to space-fill, modulo not entertaining calibration settings that are
+unlikely given current KOH fits.  Similar, rule-of-thumb analogues have
+been suggested recently.  E.g., @fer2018linking acquired batches of additional
+computer model data by mixing samples from the posterior (90\%) of the
+calibration parameters with the prior (10\%).
+
+Although our contribution is largely methodological, we are motivated
+by an industrial application involving a chemical process for concentrating Rare Earth
+Elements (REE), a significant portion of which are allocated to *high
+growth* green technologies, such as battery alloys [@Goonan2011;
+@balaram2019rare]. REEs include elements from the lanthanide series,
+Yttrium, and Scandium [@VanGosen2014]. Liquid-liquid extraction, also
+known as solvent extraction (SX), processes are often used to
+concentrate rare earth elements [@gupta] from natural and recycled
+sources. SX leverages the differing solubilities of various elements in
+organic (oil) and aqueous (water) solutions to separate elemental products.
+
+Testing SX plants is expensive due to the time required for the process to
+reach steady state, and the difficulty of directly manipulating some of the
+explanatory variables. Active learning in the "field" is infeasible. Gathering data on elemental concentrations
+across the organic and aqueous phases is much easier.  SX chemical reactions are governed by unknown chemical equilibrium constants, but knowledge of exact values in this application is not important.   Yet accurate prediction of elemental equilibrium concentrations is imperative for technical and economic analysis.  Prediction of SX
+equilibria can benefit from the additional information provided from a
+simulator via KOH. However, the high dimensionality of the simulator parameter
+space and the requisite solutions of systems of differential equations
+prohibits exhaustive evaluation. Active learning here is essential, and
+KOH-IMSPE is an excellent match.
+
+With the ultimate aim of providing evidence in that real-data/simulation
+setting, the remainder of the paper is organized as follows. In \S
+\@ref(revsec), we review the elements in play: GPs, KOH, and sequential
+design. Our KOH-IMSPE criteria is developed and explored in \S
+\@ref(kohimspesec). \S \@ref(implementation) provides implementation
+details and an empirical analysis of KOH-IMSPE in a sequential
+design/active learning context. \S \@ref(reeapp) details our application
+for an experiment studying extraction of REEs. We conclude in \S
+\@ref(discussec) with a brief discussion.
+
+# Review of basic elements {#revsec}
+
+KOH calibration couples a GP surrogate with GP bias correction, and our
+contribution involves active learning in this setting via IMSPE. These are
+reviewed in turn with an eye toward their integration in \S
+\@ref(kohimspesec).
+
+## Gaussian Process Regression {#gpsec}
+
+GP modeling means that a random variable of interest, like
+an $N \times 1$ vector of univariate responses $Y_N = Y(X)$ at a
+$N\times d$ design of inputs $X$, follows a multivariate normal (MVN)
+distribution $Y_N \sim \mathcal{N}_N (\mu, \Sigma)$. In a regression
+context, where we may apply a GP as a surrogate for computer model
+simulations $Y(X)$, it is common to take $\mu = 0$ and move all of the
+modeling "action" into the covariance structure $\Sigma$, which is
+defined by inverse distances between rows of $X$. For example,\begin{equation}
+Y_N \sim \mathcal{N}_N\left(0, \nu K(X)\right) \quad \mbox{where} \quad 
+K(X)_{ij} = k(x_i, x_j) = \exp\left(-\sum_{l=1}^d\frac{(x_{il} - x_{il}^\prime)^2}{\theta_l}\right) + \delta_{(i=j)} g.
+(\#eq:expkernel)
+\end{equation} Our specific choice of kernel $k(\cdot, \cdot)$ and the
+so-called "hyperparameterization" (via $\nu$, $g$ and $\theta$) is meant
+as an example only. There are many variations, and our contributions are
+largely agnostic to these choices. When viewing $(Y_N, X)$ as training
+data, the MVN in Eq. \@ref(eq:expkernel) defines a likelihood that can
+be used for inference for any unknowns. Textbooks offer cover for the details [@williams2006gaussian; @santner2018design;
+@gramacy2020surrogates]. Often, computer model simulations are
+deterministic, in which case the so-called a *nugget* parameter $g$ is
+taken as zero (or small $g \equiv \varepsilon > 0$ for better conditioned
+$K(X)$).
+
+Regression, i.e., deriving a surrogate for new runs $x$, is facilitated
+by extending the MVN relationship in Eq. \@ref(eq:expkernel) for $Y_N$
+to $Y(x)$. Below, $x$ could be an $N' \times p$ matrix, but usually
+$N' = 1$ and thus $x$ is a $d$-vector. \begin{equation}
+\begin{bmatrix}
+Y(x) \\
+Y_N
+\end{bmatrix} \sim \mathcal{N}_{N' + N}\left(\begin{bmatrix}
+0\\
+0
+\end{bmatrix}, \nu \begin{bmatrix}
+k(x,x) & k(x,X)\\
+k(X,x) & K(X)
+\end{bmatrix}\right) (\#eq:gpsim)
+\end{equation} 
+Above, $k(x, X)$ provides cross-kernel
+evaluations between rows of $x$ and $X$, and
+$K(X) \equiv k(X,X)$. Then, standard MVN conditioning reveals
+$Y(x) \mid Y_N \sim \mathcal{N}_{N'} (\mu_N(x), \Sigma_N(x)))$, where
+\begin{equation}
+\mu_N(x) = k(x,X)^\top K(X)^{-1}Y_N  \quad\quad\quad
+\hat{\Sigma}_N(x) = \nu (k(x,x) - k(x,X)K(X)^{-1}k(X,x)). (\#eq:krigvar)
+\end{equation} These are known as the Kriging equations
+[@matheron1963principles] in the geo-spatial literature, and they can be
+shown to provide the best linear unbiased predictor
+[@santner2018design], among other attractive properties.
+
+```{r predvarfigcode, echo = FALSE, cache = TRUE,  warning = FALSE, message = FALSE}
+
+library(laGP)
+library(hetGP)
+
+source("exp/1d-sinusoid/sinusoid-calib.R")
+source("code/koh-imspe.R")
+
+set.seed(14)
+
+eps <- 1e-6
+X <- matrix(c(0.06,0.3, seq(from = 0.4, to = 0.45, length.out = 2), 0.8,1), ncol = 1, nrow = 6)
+
+X <- rbind(X,X)
+
+Z <- drop(Field(X, sd = 0.05))
+
+dmax <- 0.25
+XX <- matrix(seq(from = 0, to = 1, length.out = 500), ncol = 1, nrow = 500)
+
+s <- sort(drop(XX), index.return= TRUE)$ix
+XX <- XX[s, , drop = FALSE]
+
+##############################
+#### No model data
+##############################
+
+
+singp <- newGP(X, Z, d=0.1, g=eps, dK=TRUE)
+mle <- jmleGP(singp, drange=c(eps, dmax*10))
+preds <- predGP(singp, XX=  XX, lite = FALSE, nonug = TRUE)
+mu <- preds$mean
+predvar <- preds$Sigma
+d1 <- mle$d
+deleteGP(singp)
+
+K <- covar.sep(X, d = mle$d, g = mle$g)
+
+Ki <- solve(K)
+Ki <- (t(Ki) + Ki)/2
+Kiy <- solve(K,matrix(Z, nrow = length(Z), ncol = 1))
+nuhat <- drop(crossprod(Z, Kiy)/length(Z))
+
+draws <- 25
+#Y.sample <- mvtnorm::rmvnorm(draws, mean = mu, sigma = predvar)
+qlower <- qnorm(0.025, mean = mu, sd = sqrt(diag(predvar)))
+qupper <- qnorm(0.975, mean = mu, sd = sqrt(diag(predvar)))
+
+imspevec <- rep(NA, times = nrow(XX))
+
+W <- matrix(NA, ncol = length(Z) +1, nrow = length(Z) +1)
+W[1:length(Z),1:length(Z)] <- Wij(mu1 = X, theta = mle$d, type = "Gaussian")
+
+
+for(i in 1:nrow(XX)){
+  
+  xtilde <- XX[i, ,drop = FALSE]
+  K_x.fm <- cov_gen(xtilde, X, theta = mle$d, type = "Gaussian")
+  Kikx <- solve(K,t(K_x.fm))
+  b <-  drop((1 + mle$g) - K_x.fm %*% Kikx)
+  
+  Kn1i <- Kn1i.fn(Ki = Ki, b = b, K_x.fm = K_x.fm, Kikx = Kikx)
+
+  W[length(Z) +1,1:length(Z)] <- W[1:length(Z),length(Z) +1] <- drop(Wij(mu1 = xtilde, mu2 = X, theta = mle$d, type = "Gaussian"))
+  W[length(Z) +1,length(Z) +1] <- drop(Wij(mu1=xtilde, theta = mle$d, type = "Gaussian"))
+  
+  imspevec[i] <- nuhat * (1 + eps -sum(Kn1i*W))
+}
+
+pannel1 <- pannel2 <- list(X = X, XX = XX, Z = Z)
+
+pannel1$mu <- mu
+pannel1$predvar <- predvar
+pannel1$K <- K
+pannel1$Ki <- Ki
+pannel1$Kiy <- Kiy
+pannel1$nuhat <- nuhat
+pannel1$qupper <- qupper
+pannel1$qlower <- qlower
+pannel1$imspevec <- imspevec
+
+#####################################
+######## KOH-IMSPE ##################
+####################################
+
+log.IMSPE <- TRUE
+
+
+# Xm <- randomLHS(n= 35, k = 2)
+Xm <- seq(from = 0, to = 1, length.out = 7)
+Xm <- as.matrix(expand.grid(Xm, Xm))
+Xm <- unname(Xm)
+
+Zm <- Comp_Model(x = Xm[,1], u = Xm[,2])
+
+Xf <- X
+
+fits <- GP_Fits(Xm = Xm, yM = Zm, Xf = Xf, yF = Z, eps = eps)
+
+uhat <- fits$uhat
+Vm <- fits$tau2M
+Vb <- fits$tau2B
+theta_m <- fits$LS.M
+theta_b <- fits$LS.B
+gb <- fits$Nug.B
+type <- "Gaussian"
+
+W11.fn <- W11.gaussian
+W12.fn <- W12.gaussian
+W11.xtilde <- W11.xtilde.gaussian
+W12.xtilde <- W12.xtilde.gaussian
+ 
+nm <- nrow(Xm) - 1
+nf <- nrow(Xf) + 1
+
+Xm.full <- Xm
+
+xtilde <- Xm[nrow(Xm), , drop = FALSE]
+Xm <- Xm[-nrow(Xm),]
+
+for(i in 1:nrow(XX)){
+  
+  
+  Xf <- rbind(X,XX[i])
+  
+  Xfm <- rbind(cbind(Xf,rep(1, nrow(Xf)) %x% t(uhat)), Xm)
+  Xfuhat <- Xfm[1:nf,]
+
+  Km <- cov_gen(Xfm, theta = theta_m, type = type)
+  Km <- Vm*(Km + diag(nrow(Km))*eps)
+  
+  Km[1:nf,1:nf] <- Km[1:nf,1:nf] + (Vb)*(cov_gen(Xf, theta = theta_b, type = type) + diag(nf)* gb)
+  
+  Ki <- solve(Km)
+  
+  Ki <- (Ki + t(Ki))/2
+  
+
+  W11_mr1 <- W11.fn(Xf = Xf, uhat = uhat, Xm = Xm, theta_m=  theta_m, type = type)
+  W12 <- W12.fn(Xf = Xf, uhat = uhat, Xm = Xm, theta_m=  theta_m, theta_b = theta_b, Xfuhat = Xfuhat, type = type)
+  W22 <- matrix(0, nrow = nrow(Xf) + nrow(Xm) + 1, ncol = nrow(Xf) + nrow(Xm) + 1)
+  W22[1:nrow(Xf), 1:nrow(Xf)] <- hetGP::Wij(mu1 = Xf, theta = theta_b, type =type)
+  
+  params <- list()
+  params$Xm <- Xm
+  params$Xf <- Xf
+  params$Ki <- Ki
+  params$W11_mr1 <- W11_mr1
+  params$W12 <- W12
+  params$W22 <- W22
+  params$type <- type
+  params$eps <- eps
+  params$Vm <- Vm
+  params$Vb <- Vb
+  params$theta_m <- theta_m
+  params$theta_b <- theta_b
+  params$uhat <- uhat
+  params$Km <- Km
+  params$log.IMSPE <- log.IMSPE
+  params$Xfuhat <- Xfuhat
+  params$Xfm <- Xfm
+  params$log.IMSPE <- FALSE
+  
+  imspevec[i] <- IMSPE.obj(xtilde, params = params)
+
+
+}
+
+Xf <- X
+Xm <- Xm.full
+XXU <- cbind(XX, rep(1, times = nrow(XX)) %x% uhat)
+
+nm <- nrow(Xm)
+nf <- nrow(Xf)
+
+Xfm <- rbind(cbind(Xf,rep(1, nrow(Xf)) %x% t(uhat)), Xm)
+Xfuhat <- Xfm[1:nf,]
+
+modelfit <- newGP(Xm, Zm, d = theta_m, g = eps)
+Yhatm <- predGP(modelfit, Xfuhat, nonug=  TRUE, lite = TRUE)$mean
+biasfit <- newGPsep(Xf, Z - Yhatm, d= theta_b, g = gb)
+
+preds.model <- predGP(modelfit, XXU, nonug = TRUE)
+preds.bias <- predGPsep(biasfit, XX, nonug = TRUE)
+
+deleteGP(modelfit)
+deleteGPsep(biasfit)
+
+mu <- preds.model$mean + preds.bias$mean
+## the line below is incorrect and produces higher variance regions
+#predvar <- preds.model$Sigma + preds.bias$Sigma
+
+Xfm <- rbind(cbind(Xf,rep(1, nrow(Xf)) %x% t(uhat)), Xm)
+Xfuhat <- Xfm[1:nf,]
+
+Km <- cov_gen(Xfm, theta = theta_m, type = type)
+Km <- Vm*(Km + diag(nrow(Km))*eps)
+  
+Km[1:nf,1:nf] <- Km[1:nf,1:nf] + (Vb)*(cov_gen(Xf, theta = theta_b, type = type) + diag(nf)* gb)
+
+predvar <- rep(NA, times = nrow(XXU))
+
+for(i in 1:nrow(XXU)){
+  xf <- XXU[i, ,drop = FALSE]
+  
+  km <- Vm*cov_gen(Xfm, xf, theta = theta_m, type = type)
+  kb <- Vb*cov_gen(Xf, xf[1,,drop = FALSE], theta = theta_b, type = type)
+  
+  kmb <- km
+  kmb[1:nf,] <- km[1:nf,] + kb
+  
+  Kik <- solve(Km, kmb)
+  predvar[i] <- Vm + Vb - crossprod(kmb, Kik)
+}
+
+predvar <- diag(predvar)
+
+draws <- 25
+#Y.sample <- mvtnorm::rmvnorm(draws, mean = mu, sigma = predvar)
+qlower <- qnorm(0.025, mean = mu, sd = sqrt(diag(predvar)))
+qupper <- qnorm(0.975, mean = mu, sd = sqrt(diag(predvar)))
+
+
+pannel2$mu <- mu
+pannel2$predvar <- predvar
+#pannel2$Y.sample <- Y.sample
+pannel2$qupper <- qupper
+pannel2$qlower <- qlower
+pannel2$imspevec <- imspevec
+
+eps <- sqrt(.Machine$double.eps)
+```
+
+```{r predvarfig, echo = FALSE, fig.cap = "\\textit{top panels:} GP surfaces for field predictions given just field data (\\textit{left}) and field data combined with simulator data using KOH (\\textit{right}); \\textit{bottom panels:} Uncertainty quantifation and acquisition critiera corresponding to the pannels directly above.", warning = FALSE, message = FALSE, fig.height = 5, fig.width = 7, fig.align = "center", fig.pos="ht!"}
+###############
+##  plots
+#################
+
+# layout(mat = matrix(c(1,2,5,3,4,5), nrow = 3, ncol = 2), heights = c(1,1,0.3))
+layout(mat = matrix(c(1,2,3,4), nrow = 2, ncol = 2), heights = c(1,1))
+a <- 5
+# par(mar= c(0,0,0,0) + 0.1, xpd = NA, cex = 0.6)
+# plot(1:3,rnorm(3), ylim=  c(-2,2),pch = 1, lty = 1, type = "n", axes = FALSE, ann = FALSE)
+# legend(2,-6, legend = c("Data", "True f(X)", "Predictive Mean", "GP Samples", "95% Predictive Interval"), lty = c(NA, 1,1,1,2), pch = c(19, NA, NA, NA, NA), col=  c("blue","blue", "black","grey", "black"), cex = 1, horiz = TRUE, xjust = 0.5)
+
+#############
+## data set 1
+################
+
+
+mu <- pannel1$mu
+predvar <- pannel1$predvar
+#Y.sample <- pannel1$Y.sample
+qupper <- pannel1$qupper
+qlower <- pannel1$qlower
+imspevec <- pannel1$imspevec
+
+
+y.lim <- ylim.fit <- range(c(qlower, qupper))
+
+par(mar = c(1, 3.7,3,0.1), cex = 0.75, lwd = 0.9)
+plot(XX, mu, type ="l", col = "black",ylim= y.lim, main= bquote(Y^"F" * "(" * x * ")" == y^"F" * "(" * x * ")" + epsilon ) , xlab = "",ylab = "",xaxt = "n")# bquote(Y^"F" * "(" * x * ")"))
+title(ylab=bquote(Y^"F" * "(" * x * ")"), line=2.2)
+# for(i in 2:nrow(Y.sample)){
+#   lines(XX, Y.sample[i,], col = "grey")
+# }
+lines(XX, qlower, lty = 2, col = "red")
+lines(XX, qupper, lty = 2, col = "red")
+
+
+
+lines(XX, drop(Field(XX, sd = 0)), col = "blue")
+
+points(X, Z, pch = 19, col = "blue")
+
+legend.use <- c(2,3,4)
+
+legend("topright", legend = c("Data", "True Function", "Predictive Mean", "95% Predictive\nInterval", "Variance", "IMSPE","Min IMSPE")[legend.use], lty = c(NA, 1,1,2,2,1, NA)[legend.use], pch = c(19, NA, NA, NA,NA, NA, 8)[legend.use], col=  c("blue","blue", "black", "red","black", "red","red")[legend.use], cex = 1, bty = "n")
+
+
+
+par(new = TRUE, xpd = TRUE, mar = c(4,3.7,0.1,0.1))
+
+for(i in 1:length(drop(X))){
+  lines(rep(drop(X)[i], times = 10), seq(from = -10, to = Z[i], length.out = 10), col = "blue", lty = 3)
+}
+
+y.lim <- y.lim.uq <- log10(range(c(imspevec, diag(predvar), diag(pannel2$predvar))))
+
+par(xpd = NA)
+plot(XX, log10(imspevec), col = "red", ylim = y.lim, type = "l", main = "", xlab = "X", ylab = "")#, ylab = "UQ Value")
+title(ylab=bquote("log"[10] * "(UQ Value)"), line=2.2)
+lines(XX, log10(diag(predvar)), col = "black", lty = 2)
+par(new = TRUE, xpd= TRUE)
+
+for(i in 1:length(drop(X))){
+  lines(rep(drop(X)[i], times = 10), seq(from = y.lim[1], to = log10(5), length.out = 10), col = "blue", lty = 3)
+}
+points(XX[which.min(imspevec)], log10(imspevec[which.min(imspevec)]), pch = 8, col = "red")
+points(XX[which.max(diag(predvar))], log10(diag(predvar)[which.max(diag(predvar))]), pch = 8, col = "black")
+#legend("top", legend = c("Variance", "IMSPE","Min IMSPE", "Data Inputs"), col = c("black", "red","red","blue"), lty= c(2,1, NA,2), pch = c(NA, NA, 8, NA), bg = "white", horiz = TRUE, cex = 0.75, inset = 0.02)
+
+
+
+#############
+## data set 2
+############
+
+mu <- pannel2$mu
+predvar <- pannel2$predvar
+#Y.sample <- pannel2$Y.sample
+qupper <- pannel2$qupper
+qlower <- pannel2$qlower
+imspevec <- pannel2$imspevec
+
+
+y.lim <- ylim.fit #range(c(Y.sample, qlower, qupper))
+
+par(mar = c(1,2,3,1.8), cex = 0.75, lwd = 0.9)
+plot(XX, mu, type ="l", col = "black",ylim= y.lim, main=  bquote(Y^"F" * "(" * x * ")" == y^"M" * "(" * x * ", " * u * "*" * ")" + b * "(" * x * ")" + epsilon ), xlab = "",ylab = "", xaxt = "n", yaxt = "n")
+# for(i in 2:nrow(Y.sample)){
+#   lines(XX, Y.sample[i,], col = "grey")
+# }
+lines(XX, qlower, lty = 2, col = "red")
+lines(XX, qupper, lty = 2, col = "red")
+#lines(XX, preds.model$mean, col= "red")
+#lines(XX, preds.bias$mean, col = "blue")
+
+
+
+lines(XX, drop(Field(XX, sd = 0)), col = "blue")
+
+points(X, Z, pch = 19, col = "blue")
+
+legend.use <- c(5,6,7,8)
+
+legend("topright", legend = c("Data", "True f(X)", "Predictive Mean   ", "95% Predictive\nInterval", as.expression(bquote(hat(Sigma)[N] * "(" * x * ")")), as.expression(bquote("Max " * hat(Sigma)[N] * "(" * x * ")")), "IMSPE","Min IMSPE")[legend.use], lty = c(NA, 1,1,2,2,NA,1, NA)[legend.use], pch = c(19, NA, NA, NA,NA,8, NA, 8)[legend.use], col=  c("blue","blue", "black", "red","black", "black", "red","red")[legend.use], cex = 1, bty = "n", y.intersp = c(0.5,1.75,1.75,0.5))
+
+#legend("topright", legend = c("Data", "True f(X)", "Predictive Mean", "GP Samples", "95% Predictive Interval"), lty = c(NA, 1,1,1,2), pch = c(19, NA, NA, NA, NA), col=  c("blue","blue", "black","grey", "black"), cex = 0.75)
+
+par(new = TRUE, xpd = TRUE, mar = c(4,2,0.1,1.8))
+
+for(i in 1:length(drop(X))){
+  lines(rep(drop(X)[i], times = 10), seq(from = -10, to = Z[i], length.out = 10), col = "blue", lty = 3)
+}
+
+y.lim <- y.lim.uq #range(c(imspevec, diag(predvar)))
+
+par(xpd = NA)
+plot(XX, log10(imspevec), col = "red", ylim = y.lim, type = "l", main = "", xlab = "X", ylab = "", yaxt = "n")
+lines(XX, log10(diag(predvar)), col = "black", lty = 2)
+par(new = TRUE, xpd= TRUE)
+for(i in 1:length(drop(X))){
+  lines(rep(drop(X)[i], times = 10), seq(from = y.lim[1], to = log10(5), length.out = 10), col = "blue", lty = 3)
+}
+points(XX[which.min(imspevec)], log10(imspevec[which.min(imspevec)]), pch = 8, col = "red")
+points(XX[which.max(diag(predvar))], log10(diag(predvar)[which.max(diag(predvar))]), pch = 8, col = "black")
+
+
+```
+
+The top left panel of Figure \@ref(fig:predvarfig) shows the results of fitting a zero mean GP to a modest, but noisy, data set.  Details for the data-generating mechanism(s) involved in this example are delayed until \S\@ref(illustration).
+The predictive mean and the true mean function, shown as the solid black and blue lines respectively, are fairly close together, illustrating decent accuracy.  Red dashed lined indicate 95\% predictive intervals, calculated from $\hat{\Sigma}_N(x)$ and shown as a dotted black line in the bottom left panel.  Observe that the interval becomes wider, depicting higher uncertainty, in-between two training data locations.  
+<!-- The true data-generating function typically lies within the predictive interval, providing further evidence of a good fit and reasonable GP modeling assumptions. -->
+
+## Integrated Mean Squared Prediction Error {#imspesec}
+
+Those equations \@ref(eq:krigvar)
+have many uses: simply predicting at novel $x$ not coinciding with
+training runs $X$; deducing where $Y(x)$ might be minimized via
+Bayesian optimization [BO, @jones1998efficient]; exploring
+which coordinates of $x$ most influence $Y(x)$
+[@marrel2009calculations]; to name just a few. Here we are interested in
+sequential experimental design, or active learning, to select new runs
+for an improved fit/prediction.
+
+The simplest variation on this theme is to choose $\tilde{x}_{N+1} =
+\mathrm{argmax}_{x \in \mathcal{X}} \hat{\Sigma}_N(x)$, i.e., to maximize the
+predictive variance. Here $x$ and
+$\tilde{x}_{N+1}$ represent a single $N' = 1 \times d$ coordinate vector in
+the input space $\mathcal{X}$, but the idea is easily generalized to larger
+batches.
+<!-- for deterministic and homoskedastic data. -->
+@mackay1992information showed that such acquisitions lead to
+(approximate) maximum entropy designs in the context of neural
+network surrogates, and @seo2000gaussian extended these to GPs naming the idea
+*active learning MacKay* (ALM). Despite their simplicity, convenient closed
+form, and analytic gradients (not shown) for efficient library-based numerical
+optimization, ALM-based sequential designs are aesthetically limiting as they
+tend to concentrate new runs on the boundary of the input space $\mathcal{X}$.
+ALM is also inefficient for prediction unless the boundary is
+especially important to the application at hand.
+
+If accuracy over the entirety of the input space
+$\mathcal{X}$ is desired then it helps to have a criterion that more
+squarely targets that objective. @sacks1989design proposed the
+integrated mean-squared prediction error (IMSPE) criterion, encapsulated
+generically as $\mathrm{IMSPE}(X) = \int_{\mathcal{X}} \hat{\Sigma}_N(x) \; dx$.
+Again $x$ is $1 \times d$ so that the integral is
+$d$-dimensional. One could use this criterion to choose an entire
+$N \times d$ design $X$ in one shot by optimizing over all $Nd$
+coordinates as in
+$\tilde{X} = \mathrm{argmin}_{X \in \mathcal{X}^N} \mathrm{IMSPE}(X)$, or
+to simply augment $X$ with a new row $x_{N+1}$ sequentially, in an
+active learning setting. Independently, @cohn1994neural developed a
+similar criterion for neural network surrogates and one-at-a-time
+acquisition, approximating the integral as a sum; @seo2000gaussian
+extended their work to GPs, dubbing this Active Learning Cohn (ALC). 
+Variations abound (see \S 1).
+
+Here we follow the mathematics laid out by @binois2019replication, who
+provided a closed form IMSPE and gradient under a uniform measure for
+$\mathcal{X} \in [0,1]^d$, i.e. $p(\mathcal{X}) = \mathcal{U}
+[0,1]^d$. Their interest, like ours, was in active learning (i.e., acquisition
+of $x_{N+1}$) although their development is equally applicable to one-shot and
+batch design. The approach is at once elegant and practical in implementation,
+and consequently has spurred a cottage industry of variations
+[@wycoff2021jcgs; @cole2021locally;
+@sauer2021active] of which our main contribution can be viewed as yet another.
+The derivation relies on two trace identities: $\mathrm{tr}(ABC) = \mathrm{tr}(BCA)$; and $\mathrm{tr}(AB) = 1^\top (A \circ B)1$  where $1$ is a vector of ones with
+a length equal to the number of rows in $X$, and $\circ$ is the Hadamard, or element wise, product.  It also involves a re-positioning of the integral inside of the
+matrix trace, which is legitimate as both are linear operators. A uniform
+measure yields closed forms for $W(X) = W(X,X) = \int_{[0,1]^d} k(X,x)
+k(X,x)^\top \; dx$ as an $N \times N$ under common kernels $k(\cdot, \cdot)$,
+which are not duplicated here. See the appendix of @binois2019replication.  Combining those elements, and interpreting the integral as an expectation
+over uniform $x$, yields
+\begin{equation}
+\begin{split}
+\mathrm{IMSPE}(X) &= \int_{[0,1]^d} \nu k(x,x) - \nu k(x,X)^\top K(X)^{-1}k(X,x) \; dx\\
+&= \nu - \int_{[0,1]^d} \mathrm{tr}\left( \nu K(X)^{-1}  k(X,x) k(x,X) \right) \; dx\\
+&= \nu - \nu 1^\top \left( K(X)^{-1} \circ W(X)  \right) 1.
+\end{split}
+(\#eq:imspe)
+\end{equation} 
+We introduce these techniques, and enhanced level of detail for a review,
+because our own work in \S \@ref(kohimspesec) involves similar operations.
+In practice, estimates of $\nu$ maybe be used and those may involve $(X,Y_N)$.  However, the typical development presumes
+that we don't have $Y$-values yet, or at least not $y_{N+1}$ in the
+active learning context. Consequently, it is equivalent to choose
+\begin{equation}
+\tilde{x}_{N+1} = \underset{x \in [0,1]^d}{\mathrm{argmin}} \  1^\top \left( K(X)^{-1} \circ W(X)  \right) 1 \quad\quad \mbox{ where } X \equiv [X; x^\top],
+(\#eq:minimspe)
+\end{equation} i.e., where $X$ is augmented with the new row $x^\top$.
+In this way, the acquisition explicitly targets predictive accuracy by
+minimizing mean-squared error. One consequence of this is that
+acquisitions avoid boundaries of $\mathcal{X} = [0,1]^d$ as that
+set has no volume relative to the interior being integrated over.
+
+Returning to Figure \@ref(fig:predvarfig), the bottom left plot allows for comparison of the dotted black line plotting predictive variance, and the solid red line plotting IMSPE as a function of the $x$ augmenting the initial design.  The minimum IMSPE point, $\tilde{x}_{N+1}$ is a red asterisk.  Observe that the input with the highest predictive variance, at the left boundary, does not agree with $\tilde{x}_{N+1}$.  
+
+<!-- Given GP parameter estimates, $\tilde{x}_{N+1}$ is a *best guess* as to where next to acquire data in order to obtain the greatest average reduction in predictive variance.  Using the highest variance point to acquire new data sets a goal of reducing maximum, instead of mean, predictive variance, and can be useful in certain implementations where prediction at a specific location is imperative [@gramacy2016lagp]. -->
+
+## Simulator calibration {#koh}
+
+Now suppose we have data from two experiments: a simulation campaign and
+measurements from an analogous physical/field apparatus.  As a highly stylized
+concrete example, consider data described in @gramacy2020surrogates \S 9.2,
+via a physics model and empirical observations of the time $t$ a ball would
+take to drop from a given height $h$. The model/simulator, described $t =
+\sqrt{2h/g}$ depends on an (unknown) gravitational constant $g$, and does not
+incorporate any other factors such as kinetic/wind resistance.  The model can
+be freely evaluated for positive values of both $h$, and $g$. In the physical
+apparatus only the height $h$ can be easily controlled.  So $g$ is a *tuning
+parameter*, and also one possibly doing double-duity to account for any other
+factors not in the model which would slow the ball down in its fall.
+
+<!-- Although the term "calibration" has diverse definitions, even within the
+computer surrogate modeling literature but especially beyond, -->
+
+It makes sense
+to entertain modeling apparatus that can synthesize these two data sources:
+estimating an appropriate $g$ -- not necessarily identifying its "true"
+value, because the model doesn't incorporate all of the physics -- and
+correcting the bias in the computer model in order to furnish accurate
+predictions for $t$ at any $h$ of interest. The KOH calibration model does
+this well.  In our description here, and introduction of notation more general
+than the ball-drop example, we follow @bayarri2009modularization.  Let $Y^{M}([x_{1\times p},u_{1\times s}]_{1 \times d}) \equiv t = Y^{M}([h,g]_{1 \times 2})$ for the simple example
+above.  Put another way, an observation of the computer model, $Y^M(x,u)$, is simply equal
+to a function of $x_{1 \times p}$ and a tuning
+parameter $u_{1 \times s}$, where for the simple example $h \equiv x$ and $g
+\equiv u$.  If the computer model is expensive to evaluate, a GP surrogate can
+be fit to a $N_M \times 1$ vector of observations $Y_{N_M}$ simulation
+campaign of inputs $\lbrack X_{N_M \times p}, U_{N_M \times s} \rbrack$.
+
+KOH assumes the real field observations at location $x$,
+$Y^F(x)$, can be modeled as a noisy realization of 
+a computer model $y^M(x, u)$ set at the ideal/true
+value of $u = u^\star$ after correcting for the bias $b(x)$,
+or any systematic discrepancy inherent in the computer model:
+\begin{align}
+Y^F(x) &= y^M(x,u^\star) + b(x) + \epsilon (\#eq:modelbias), \quad \epsilon \stackrel{\mathrm{iid}}{\sim} \mathcal{N}(0, \sigma^2).
+\end{align}
+KOH places a GP prior on $b(\cdot)$ so that $\hat{b}(x)$ may be estimated jointly
+with $\hat{u}$ and $\hat{\sigma}^2$ based on observed discrepancies $b(x) =
+y^F - y^M(x, u)$ values from a simulation and field data campaign. Provided
+that a second GP is used as a surrogate for $Y^M(x,u)$, the joint marginal
+likelihood, governing prediction and hyperperameter inference, for field data
+$Y_{N_F}$, computer model runs $Y_{N_M}$, and predictive outputs $Y^F(x)
+\equiv Y^F(x, \hat{u})$ derives from multivariate normal, of dimension
+$N_F + N_M + 1$ with mean zero and covariance matrix
+\begin{equation}
+\mathbb{C}\mathrm{ov}\left(
+\begin{bmatrix}
+Y^F(x, \hat{u})\\
+Y_{N_F}\\
+Y_{N_M}
+\end{bmatrix}
+\right) = \Sigma^{M}+ \Sigma^B
+\quad \mbox{where} \quad 
+\Sigma^B
+ = \nu_B \begin{bmatrix}
+k^B{(x)} &   k^B{(x,X_{N_F})} & 0 \\
+k^B{(X_{N_F}, x)} & K^B(X_{N_F}) & 0 \\
+0 & 0 & 0\\
+\end{bmatrix}
+(\#eq:kohimspecov)
+\end{equation}
+\begin{equation}
+\mbox{and} \quad \Sigma^M = \nu_M\begin{bmatrix}
+k([x, \hat{u}]) &   k{([x, \hat{u}],[X_{N_F}, \hat{U}])} &  k{([x, \hat{u}],[X_{N_M}, U_{N_M}])}\\
+k{([X_{N_F}, \hat{U}], [x, \hat{u}])} & K([X_{N_F}, \hat{U}]) & K([X_{N_F}, \hat{U}],[X_{N_M}, U_{N_M}])\\
+k([X_{N_M}, U_{N_M}],[x, \hat{u}]) & K([X_{N_M}, U_{N_M}],[X_{N_F}, \hat{U}]) & K([X_{N_M}, U_{N_M}])
+\end{bmatrix}.
+\notag
+\end{equation}
+Above, additional subscripts $\nu_M$ and $\nu_B$ indicate separate scale
+hyperparameters for the surrogate and bias GPs, respectively. We
+use $k(\cdot)$ and $K(\cdot)$ for the computer model kernel and matrix
+evaluation, etc, and introduce $B$ superscripts for the bias analog. Implicit
+in $K^B(\cdot)$ as an additive diagonal $\mathbb{I}g$ so that a nugget
+parameter $g$ can capture noise with variance $\sigma^2 = \nu_B g$. The two
+kernels may come from a similar family, but are uniquely hyperparmeterized,
+however this is suppressed from the notation for simplicity.
+
+The predictive equations are derived in a manner similar to Eqs.~\@ref(eq:gpsim)--\@ref(eq:krigvar), except resulting in a more complicated set of matrix--vector multiplications.  The mean is not central to our discussion here,
+but form of the variance is important for calculating IMSPE.  We have that
+\begin{align}
+\hat{\Sigma}(x \mid \hat{u}) &\equiv 
+\mathbb{V}\mathrm{ar} ( Y^F(x,\hat{u}) \mid Y_{N_F}, Y_{N_M}) 
+(\#eq:krigvarfield) \\
+&= \nu_M k([x, \hat{u}])  + \nu_B k^B{(x)} - \begin{bmatrix}
+\nu_M k + \nu_B k^B
+\end{bmatrix}^\top \begin{bmatrix}
+ \Sigma^{M,B}_{N_F + N_M}
+\end{bmatrix}^{-1}
+\begin{bmatrix}
+\nu_M k + \nu_B k^B
+\end{bmatrix} \notag \\
+\mbox{where} \quad k &= \begin{bmatrix}
+k{([X_{N_F}, \hat{U}], [x, \hat{u}])} \\
+k([X_{N_M}, U_{N_M}],[x, \hat{u}])
+\end{bmatrix} \quad\quad\quad 
+k^B = \begin{bmatrix}
+k^B{(X_{N_F}, x)} \\
+0_{N_M}
+\end{bmatrix} \notag \\
+\Sigma^{M,B}_{N_F + N_M} &=  \begin{bmatrix}
+\nu_M K([X_{N_F}, \hat{U}]) + \nu_B K^B(X_{N_F}) & \nu_M K([X_{N_F}, \hat{U}],[X_{N_M}, U_{N_M}])\\
+\nu_M K([X_{N_M}, U_{N_M}],[X_{N_F}, \hat{U}]) & \nu_M K([X_{N_M}, U_{N_M}])
+\end{bmatrix}. \notag
+\end{align}
+The top right panel of Figure \@ref(fig:predvarfig) shows a GP fit using the
+same data in the top left plot, but augmented with simulator runs ($Y_{N_M},
+X_{N_M}$) using the KOH framework.  This extra information results reduced
+predictive variance across the input space as indicated by comparing black
+dotted lines in the bottom panels.  More data, even if the data is not field
+data, reduces predictive uncertainty.  Further reductions could be realized
+with even more computer model runs, which is the target of our main
+methodological contribution.
+
+# Optimal acquisition of new simulator runs {#kohimspesec}
+
+Here we derive a closed form active learning criteria by deploying IMSPE in the KOH framework. Gradients are provided to facilitate efficient numerical optimization.  These also yield additional insight into the value of potential 
+new simulation runs.  We extend our simple illustration to reveal the new acquisition landscape.
+
+
+## Closed form KOH-IMSPE and derivative {#kohderiv}
+
+<!-- When acquiring new simulation runs for use in a KOH setup, one would want to select simulator runs which improve predictive accuracy and reduce data requirements and thereby simulator computation time.  Because GP uncertainty quantification is available in closed form, one may consider the possibility of acquiring additional simulator data in an active learning setup, potentially similar to the methods in \S \@ref(imspesec) by using an IMSPE criteria.  Doing so, would allow for the acquisition of computer simulator data, given a set of field data, with methodology which minimizes the IMSPE of field predictions.  Analytic evaluation of gradients of a closed form IMSPE for use within the Kennedy and O'Hagan framework (KOH-IMSPE) would provide fast minimization of the IMSPE criteria relative to an implementation utilizing a finite differences approximation.   -->
+
+Predictive variance $\hat{\Sigma}(x \mid \hat{u})$ in hand \@ref(eq:krigvarfield), the key step in deriving a KOH-IMSPE acquisition criteria is to integrate over the input space of the field predictive location $x$.  Throughout this discussion we condition on $(\hat{u}, \hat{\nu}_M, \hat{\nu}_B)$ and any other relevant estimated hyperparameters, e.g., via a maximum a-posteriori (MAP) [e.g., @gramacy2020surrogates, \S9.1], which would be updated after each active learning acquisition. Our focus here is how to acquire new simulator runs given those values.   Section \S\@ref(discussec) offers thoughts on how alternative hyperparameter estimation strategies might impact our active learning setup.
+
+The series of equations below outlines our approach to integrating the predictive variance over $x$, beginning with an expansion of the quadratic form in Eq. \@ref(eq:krigvarfield). Hats are dropped on the estimated scales to reduce clutter.  Although expressed here as a function of the computer model design $[X_{N_M + 1}, U_{N_M + 1}]$, IMSPE would also depend upon the field data.
+\begin{align}
+\mathrm{IMSPE}&([X_{N_M + 1}, U_{N_M + 1}]) = \int_{[0,1]^p} \hat{\Sigma}(x \mid \hat{u}) \; dx \notag \\
+%&= \nu_M + \nu_B - \notag \\
+%& \qquad \int_{[0,1]^p} \mathrm{tr}\left( \left[\Sigma^{M,B}_{N_F + N_M + 1}\right]^{-1}\left(\nu_M^2kk^\top +  \nu_M \nu_B k [k^B]^\top + \nu_M \nu_B k^B k^\top  + \nu_B^2 k^B [k^B]^\top\right)\right) \; dx (\#eq:kohimspemid)\\
+&= \nu_M + \nu_B - \int_{[0,1]^p} \mathrm{tr}\left( \left[\Sigma^{M,B}_{N_F + N_M + 1}\right]^{-1}\left(\nu_M^2kk^\top + 2\nu_M \nu_B k^B k^\top  + \nu_B^2 k^B [k^B]^\top\right)\right) \; dx (\#eq:kohimspemid)\\
+&= \nu_M + \nu_B - \int_{[0,1]^p} 1^\top \left(\left[\Sigma^{M,B}_{N_F + N_M + 1}\right]^{-1}\circ \left(\nu_M^2kk^\top + 2\nu_M \nu_B k^B k^\top  + \nu_B^2 k^B [k^B]^\top\right)\right) 1 \; dx (\#eq:kohimspehadamard)\\
+&= \nu_M + \nu_B - 1^\top \left(\left[\Sigma^{M,B}_{N_F + N_M + 1}\right]^{-1} \circ \left(\nu_M^2 W^{M,M} +  2 \nu_M \nu_B W^{M,B} +  \nu_B^2 W^{B,B}\right)\right)1
+(\#eq:kohimspefinal)
+\end{align} 
+Trace identity $\mathrm{tr}(ABC) = \mathrm{tr}(BCA)$ is involved in \@ref(eq:kohimspemid), whereas \@ref(eq:kohimspehadamard) utilizes $\mathrm{tr}(AB)  = 1^\top (A \circ B)1$.  At this point within the derivation, $\hat{\Sigma}(x \mid \hat{u})$ has been broken into a weighted sum of the functions specifying the covariance between $x$ and the observations, providing a less abstract format for integration.  Integration produces \@ref(eq:kohimspefinal), where for any $\{\alpha, \beta\} \in \{M,B\}$: $W_{\alpha, \beta} = \int_{[0,1]^p} k_\alpha k_\beta^\top \; dx$.  Solutions for the elements of $W_{\cdot, \cdot}$ are kernel-dependent.  \S \@ref(intA) provides forms compatible with Gaussian kernels.  Similar derivations for Matérn kernels can be found in @binois2019replication.
+
+Acquisition of a new computer model run $[\tilde{x}, \tilde{u}]$ requires minimizing IMSPE \@ref(eq:kohimspefinal) with the augmented design:
+\begin{equation}
+[\tilde{x},\tilde{u}] = \mathrm{argmin}_{[x,u] \in \mathcal{X}^d} \ \mathrm{IMSPE}([X_{N_M + 1}, U_{N_M +1}]) \quad \mbox{where} \quad [X_{N_M + 1}, U_{N_M + 1}] \equiv [X_{N_M}, U_{N_M};x,u].
+(\#eq:prog)
+\end{equation}
+To continue with our running illustration, the bottom-right panel of Figure \@ref(fig:predvarfig) shows KOH-IMSPE instead of typical IMSPE, but for the acquisition of an additional field data point instead of computer model point.  Notably, IMSPE, along with predictive variance, is lower for the KOH GP fit.  Because of the additional computer model data, the KOH-IMSPE surface is still multi-modal, but flat relative to the GP fit with only field data (bottom-left panel).  Additionally, the point which minimizes IMSPE when computer simulator data is introduced is different than when no computer simulator data is used. 
+
+Considering the multi-modality of the KOH-IMSPE acquisition surface, and its
+relative flatness compared with ordinary IMSPE, a thoughtful strategy for
+solving the program in Eq. \@ref(eq:prog) is essential to obtaining good
+acquisitions. Local numerical optimization via finite differentiating in this
+setting can be fraught with numerical challenges.  One option is to deploy a
+discrete candidate set for $\tilde{X}$, such as via LHS or
+triangulation [@gramacy2022triangulation].  Our analytical elicitation of
+KOH-IMSPE \@ref(eq:kohimspefinal) allows for the closed form 
+derivatives for the purpose of gradient based minimization, as we describe
+below.  Library-based (e.g., BFGS, @byrd1995limited) optimizers using
+gradients can be deployed in a random multi-start scheme, or via candidates.
+
+The derivative of KOH-IMSPE with respect to element $l$ of  $[\tilde{x}, \tilde{u}]$ is shown in Eq. \@ref(eq:imspediff). The fact that $[\tilde{x}, \tilde{u}]$ is contained within $\Sigma^{M,B}, W^{M,M},$ and $W^{M,B}$, necessitates the use of the chain rule for matrices and inverses: 
+\[
+\frac{\partial(U(x)\circ V(x))}{\partial x} = U(x)\circ\frac{\partial V(x)}{\partial x} + \frac{\partial U(x)}{\partial x}\circ V(x) \quad \mbox{ and } \frac{\partial U(x)^{-1}}{\partial x} = -U(x)^{-1}\frac{\partial  U(x)}{\partial x}U(x)^{-1}.
+\] 
+Using these, we find that the derivative of KOH-IMSPE can be written as follows:
+\begin{align}
+\frac{\partial \, \mathrm{IMSPE}}{\partial  [\tilde{x}, \tilde{u}]_l} &= 1^{\top}\left(\left[\Sigma^{M, B}_{N_F + N_M +1}\right]^{-1}\frac{\partial \Sigma^{M, B}_{N_F + N_M + 1}}{\partial [\tilde{x}, \tilde{u}]_l}\left[\Sigma^{M, B}_{N_F + N_M + 1}\right]^{-1}\!\!\!\circ \left(\nu_M^2 W^{M,M} + 2\nu_M\nu_B W^{M,B} + \nu_B^2 W^{B,B}  \right)\right. - \notag \\
+& \qquad \left. \left[\Sigma^{M, B}_{N_F + N_M + 1}\right]^{-1}\!\!\!\circ \left( \nu_M^2 \frac{\partial W^{M,M}}{\partial[\tilde{x}, \tilde{u}]_l} + 2\nu_M\nu_B \frac{\partial W^{M,B}}{\partial[\tilde{x}, \tilde{u}]_l} \right)\right)1,
+(\#eq:imspediff)
+\end{align}
+where forms for $\frac{\partial W^{M,M}}{\partial [\tilde{x},\tilde{u}]}$, $\frac{\partial W^{M,B}}{\partial [\tilde{x},\tilde{u}]}$, and $\frac{\partial\Sigma^{M, B}_{N_F + N_M + 1} }{\partial[\tilde{x}, \tilde{u}]}$ are provided in Appendices \@ref(intA) and \@ref(blockmatrixA).  
+
+It is illuminating to study how this gradient behaves when $\tilde{u} = \hat{u}$.  One might hypothesize that if KOH-IMSPE were to collect simulator data near $\hat{u}$, that the gradient of KOH-IMSPE would be near zero there.  The first term in Eq. \@ref(eq:imspediff) can be rewritten as follows using Hadamard product and trace identities.
+\[
+1^\top \frac{\partial \Sigma^{M, B}}{\partial \tilde{x}}\circ [\Sigma^{M, B}]^{-1}\left(\nu_M^2W^{M, M} + 2\nu_M\nu_B W^{M, B} + \nu_B^2 W^{B,B} \right)[\Sigma^{M, B}]^{-1}1
+(\#eq:imspediffone)
+\]
+For the Gaussian kernel, taking $\frac{\partial \Sigma^{M,B}}{\partial \tilde{u}}$ and setting $\tilde{u} = \hat{u}$ produces a matrix of mostly zeros:
+\begin{equation}
+\frac{\partial \Sigma^{M,B}}{\partial \tilde{u}}:(\tilde{u} = \hat{u}) = \nu_M \begin{bmatrix}
+0_{N_F \times N_F} & 0_{N_F \times N_M} & 0_{N_F \times 1}\\
+0_{N_M \times N_F} & 0_{N_M \times N_M} & \left(\frac{\partial k([X_M,U_M], [\tilde{x}, \tilde{u}]) }{\partial \tilde{u}}\right)_{N_M \times 1}\\
+0_{1 \times N_F} & \left(\frac{\partial k([\tilde{x}, \tilde{u}], [X_M, U_M])}{\partial \tilde{u}}\right)_{1\times N_M} & 0_{1\times 1}
+\end{bmatrix},
+(\#eq:dkdutilde)
+\end{equation} 
+since $\partial k([\tilde{x}, \tilde{u}],[X_f, \hat{U}]| \tilde{u} = \hat{u})/\partial \tilde{u} \propto -\frac{2(\tilde{u}-\hat{u})}{\theta^M}\exp\left(-(\hat{u}-\tilde{u})^2/\theta^M\right) = 0$.  Any trace of the multiplication of the differential covariance matrix by another matrix will be near, but typically not located at, a minimum when $\tilde{u}=\hat{u}$.  This result reveals a trade-off between exploratory behavior, away from $\hat{u}$, and exploitation nearby $\hat{u}$.  We shall see this behavior manifest empirically in a moment.  But first, observe that the second term in Eq. \@ref(eq:imspediff) is related to the change in the integrated covariance between $[x, \hat{u}]$, $[\tilde{x}, \tilde{u}]$, and $[X_{N_F}, \hat{U}; X_{N_M}, U_{N_M}]$.  Interestingly, both $\frac{\partial W^{M,M}}{\partial \tilde{u}}$ and $\frac{\partial W^{M,B}}{\partial \tilde{u}}$ are equal to 0 when $\tilde{u} = \hat{u}$, which would reduce the second term in \@ref(eq:imspediff) to zero under the same conditions.  In the full evaluation of \@ref(eq:imspediff), the location of a zero-value for the gradient in $U$-space balances the correlation between how close $[x, \hat{u}]$ is to $[\tilde{x}, \tilde{u}]$, as well as the correlation between $[X_{N_M}, U_{N_M}]$ and $[\tilde{x}, \tilde{u}]$.  
+
+## Illustration {#illustration}
+
+Consider the following data-generating mechanism with 1d design input $(x)$ 
+and 1d calibration parameter $(u)$.
+\begin{align*}
+y^M(x,u) &= \sin (10x, u) &
+b(x) &= 1-\frac{1}{3}x - \frac{2}{3}x^2 \\
+Y^F(x) &= y_m\left(x, u^\star = \frac{\pi}{5}\right) + b(x) + \epsilon 
+& \epsilon &\stackrel{\mathrm{iid}}{\sim} \mathcal N(0, 0.1^2)
+\end{align*}
+This example underpins the running illustrative example supported by
+Figure \@ref(fig:predvarfig). The left panel of
+Figure \@ref(fig:sinfns) shows the mean of the field data $\mathbb{E}(Y^F(x)) = y_m\left(x, u^\star = \frac{\pi}{5}\right) + b(x)$ juxtaposed against
+the computer model $y_m\left(x, u^\star = \frac{\pi}{5}\right)$, whereas
+the right panel shows how other settings of $u$ affect that computer model. 
+
+
+```{r sindata, cache= TRUE, echo = FALSE, warning=FALSE, message = FALSE}
+
+source("code/koh-imspe.R")
+source("exp/1d-sinusoid/sinusoid-calib.R")
+
+performance.list <- sinusoid.data
+
+min.pts <- performance.list$mcparams$min.pts
+max.pts <- performance.list$mcparams$max.pts
+
+eps <- sqrt(.Machine$double.eps)
+log.IMSPE <- FALSE
+
+```
+
+```{r sinfns, echo = FALSE, cache =  TRUE, fig.cap = "True surface, model surface with $u^\\star$, and effect of varying $u$ on the model surface.", fig.height = 3}
+
+legend.cex <- 0.8
+global.cex <- 0.7
+
+u.to.use <- c(pi/7,pi/6, pi/5, pi/4)
+comp.cols <- hcl.colors(length(u.to.use), palette = "Zissou1")
+
+x <- seq(from = 0, to = 1, length.out = 100)
+
+Y.models <- matrix(NA, ncol = length(u.to.use), nrow = 100)
+
+for(i in 1:length(u.to.use)){
+  Y.models[,i] <- Comp_Model(x,u.to.use[i])
+}
+
+yM <- Y.models[,which(u.to.use %in% (pi/5))]
+
+yF <- Field(x, sd = 0)
+
+plot.range <- range(c(yF,yM))
+
+par(mfcol = c(1,2), cex=  global.cex)
+
+plot(x,yF,type = "l",  col = "blue", xlab = "X", ylab = "Y", ylim = plot.range)
+lines(x,yM, col = comp.cols[3])
+
+#legend("topright", col=  c("black","blue"), lty=1, legend = c("Computer\nModel\n", "True\nResponse\n"), cex = legend.cex)
+legend("topright", col=  c(comp.cols[3],"blue"), lty=1, legend = c(as.expression(bquote(y^M * "(" * x * "," * u * "*" * ")")), as.expression(bquote(bold(E) * "[" * Y^F * "(" * x * ")" * "]"))), cex = legend.cex, y.intersp = 1.33)
+
+plot(x,Y.models[,1], type = "l", col = comp.cols[1], xlab = "X", ylab = bquote(y^M), ylim = plot.range)
+
+for(i in 2:length(u.to.use)){
+  lines(x, Y.models[,i], col = comp.cols[i])
+}
+
+legend("bottomleft", col = comp.cols, legend = c(as.expression(bquote(u == pi/7)), as.expression(bquote(u  == pi/6)), as.expression(bquote(u * "*" == pi/5)), as.expression(bquote(u == pi/4))), cex = legend.cex, lty = 1)
+
+```
+
+```{r textvars, echo = FALSE}
+min.pts <- 10
+pts.add <- c(0, 1, 2, 5, 10, 25) + 1
+field.sd <- 0.2
+unique.field <- 5
+field.reps <- 2
+grid.length <- 100
+rndm.strts <- 500
+
+set.seed(14)
+```
+
+Here we explore the KOH-IMSPE on this example.  To initialize, a $N_M = 10$-sized 2d LHS was used for the initial computer model design in
+$\lbrack X, U\rbrack$-space. Field data was collected as two replicates
+of five unique locations (i.e., $N_F = 10$) on an equally spaced grid on $X$. Following @bayarri2009modularization and @gramacy2020surrogates \S9.2, we fit a
+GP surrogate to the simulator data and bias GP to the residuals from the field data, thereby estimating $\hat{u}$ jointly with other hyperparameters 
+via MAP with $p(u) = \mathrm{Beta}(2,2)$, a standard regularizing prior on
+the calibration parameter.  We then proceeded with 
+`r pts.add[length(pts.add)] - 1` KOH-IMSPE acquisitions of new computer model
+runs.  After each acquisition the model(s) were re-fit to prepare for the
+next one.
+
+
+```{r twodfigcode, echo = FALSE, cache = TRUE}
+
+# Computer model data
+Xm <- randomLHS(10,2)
+yM <- Comp_Model(Xm[,1],Xm[,2])
+Xm.init <- Xm
+
+#Field data
+Xf <- matrix(seq(from = 0, to = 1, length.out = unique.field), ncol= 1, nrow=  unique.field)
+Xf <- rbind(Xf,Xf)
+yF <- drop(Field(Xf, sd = field.sd))
+
+candidate <- FALSE
+log.IMSPE <- TRUE
+
+x <- seq(from = 0, to = 1, length.out = grid.length)
+XX <- expand.grid(x,x)
+
+type <- "Gaussian"
+
+if(type %in% "Gaussian"){
+    W11.fn <- W11.gaussian
+    W12.fn <- W12.gaussian
+    W11.xtilde <- W11.xtilde.gaussian
+    W12.xtilde <- W12.xtilde.gaussian
+}else{
+    stop("Only Gaussian (with a capital G) covariance functions are currently available for KOH-IMSPE")
+  }
+
+tests <- c(min.pts,pts.add[length(pts.add)] + min.pts)
+
+twodplot.vals <- list()
+previous.params <- NULL
+
+fits <- GP_Fits(Xm = Xm, yM = yM, Xf = Xf, yF = yF, eps = eps)
+    
+Vb <- fits$tau2B
+Vm <- fits$tau2M
+theta_m <- fits$LS.M
+theta_b <- fits$LS.B
+gb <- fits$Nug.B
+uhat <- fits$uhat
+
+previous.params <- list(theta_m = theta_m, theta_b = theta_b, gb = gb)
+
+for(pt.add in 1:max(pts.add)){
+  
+
+xtilde <- IMSPE.optim(Xm = Xm, Xf = Xf, uhat = uhat, Vb = Vb, Vm = Vm,
+                          theta_m = theta_m, theta_b = theta_b,gb = gb,
+                          type = "Gaussian", starts = rndm.strts, eps = eps, 
+                      candidate = candidate, log.IMSPE = log.IMSPE, optim.control = list(pgtol = 0.02, trace = 0, lmm = 13))
+
+if(pt.add %in% pts.add){
+
+nm <- nrow(Xm)
+  nf <- nrow(Xf)
+
+  
+  Xfm <- rbind(cbind(Xf,rep(1, nrow(Xf)) %x% t(uhat)), Xm)
+  Xfuhat <- Xfm[1:nf,]
+  Km <- cov_gen(Xfm, theta = theta_m, type = type)
+  Km <- Vm*(Km + diag(nrow(Km))*eps)
+  
+  Km[1:nf,1:nf] <- Km[1:nf,1:nf] + (Vb)*(cov_gen(Xf, theta = theta_b, type = type) + diag(nf)* gb)
+  
+  Ki <- solve(Km)
+  
+  Ki <- (Ki + t(Ki))/2
+  
+  W11_mr1 <- W11.fn(Xf = Xf, uhat = uhat, Xm = Xm, theta_m=  theta_m, type = type)
+  W12 <- W12.fn(Xf = Xf, uhat = uhat, Xm = Xm, theta_m=  theta_m, theta_b = theta_b, Xfuhat = Xfuhat, type = type)
+  W22 <- matrix(0, nrow = nrow(Xf) + nrow(Xm) + 1, ncol = nrow(Xf) + nrow(Xm) + 1)
+  W22[1:nrow(Xf), 1:nrow(Xf)] <- hetGP::Wij(mu1 = Xf, theta = theta_b, type =type)
+  
+  params <- list()
+  params$Xm <- Xm
+  params$Xf <- Xf
+  params$Ki <- Ki
+  params$W11_mr1 <- W11_mr1
+  params$W12 <- W12
+  params$W22 <- W22
+  params$type <- type
+  params$eps <- eps
+  params$Vm <- Vm
+  params$Vb <- Vb
+  params$theta_m <- theta_m
+  params$theta_b <- theta_b
+  params$uhat <- uhat
+  params$Km <- Km
+  params$log.IMSPE <- log.IMSPE
+  params$Xfuhat <- Xfuhat
+  params$Xfm <- Xfm
+
+  
+  params.cand <- params
+  params.cand$log.IMSPE <- FALSE
+  
+  imspes <- apply(XX,1,IMSPE.obj, params = params.cand)
+
+  Xm.init <- Xm[1:min.pts,]
+  
+  temp.list <- list()
+  temp.list$imspes <- imspes
+  temp.list$uhat <- uhat
+  temp.list$Xm.init <- Xm.init
+  temp.list$xtilde <- xtilde
+  temp.list$Xm <- Xm
+  
+  twodplot.vals[[pt.add]] <- temp.list
+
+}
+
+Xm <- rbind(Xm,xtilde)
+      
+yM <- Comp_Model(Xm[,1],Xm[,2])
+
+fits <- GP_Fits(Xm = Xm, yM = yM, Xf = Xf, yF = yF, eps = eps, previous.params = previous.params)
+        
+Vb <- fits$tau2B
+Vm <- fits$tau2M
+theta_m <- fits$LS.M
+theta_b <- fits$LS.B
+gb <- fits$Nug.B
+uhat <- fits$uhat
+
+previous.params <- list(theta_m = theta_m, theta_b = theta_b, gb = gb)
+
+
+}
+```
+```{r twodfig, echo = FALSE, cache = TRUE, fig.height = 5.5, fig.width= 6.5, fig.cap= "KOH-IMSPE surface in $X, U$ space as points are sequentially added to an initial computer model design.  Red indicates lower values and white/yellow indicates larger values.", fig.align = "center"}
+cex.factor <- 0.7
+
+layout.mat <- matrix(c(7,7,7,9,9, 1,3,5,8,10, 2,4,6,8,10), ncol = 3, nrow = 5)
+rmar.7 <- 0.15
+rmar.8 <- 0.3
+layout(mat = layout.mat, heights = c(1,1,1,rmar.8, rmar.8*0.8), widths = c(rmar.7, 1,1))
+
+mar.mat <- matrix(1, ncol = 5, nrow = length(pts.add))
+mar.mat[,1] <- pts.add
+
+mar.mat[,4+1] <- mar.mat[, 4+1] + rep(c(0.05, 0), times= 3)
+mar.mat[, 2+1] <- mar.mat[, 2 + 1] + rep(c(0,0.05), times = 3)
+
+
+### logical matrix providing if X and Y axis labels should be included
+axis.mat <- matrix(NA, ncol = 2, nrow = length(pts.add))
+axis.mat[,1] <- c(rep(FALSE, times = 4), rep(TRUE, times = 2))
+axis.mat[,2] <- rep(c(TRUE, FALSE), times = 3)
+
+
+
+for(pt.add in pts.add){
+  
+  temp.list <- twodplot.vals[[pt.add]]
+  
+  imspes <- temp.list$imspes
+  uhat <- temp.list$uhat
+  Xm.init <- temp.list$Xm.init
+  xtilde <- temp.list$xtilde
+  Xm <- temp.list$Xm
+  
+  par(mar = mar.mat[which(pts.add %in% pt.add),-1], cex = cex.factor, xpd = NA, cex.axis = 0.9) 
+  if(axis.mat[which(pts.add %in% pt.add), 1]){
+    x.lab <- "X"
+    x.axt <- "s"
+  }else{
+    x.lab <- ""
+    x.axt <- "n"
+  }
+  
+  if(axis.mat[which(pts.add == pt.add), 2]){
+    y.lab <- "U"
+    y.axt <- "s"
+  }else{
+    y.lab <- ""
+    y.axt <- "n"
+  }
+  
+  image(x, x,z=matrix(imspes, ncol=grid.length),xlab="",ylab= "",col=heat.colors(128), main="", xaxt = x.axt, yaxt = y.axt)
+  title(ylab = y.lab, line = 2.25)
+  title(xlab = x.lab, line = 2.25)
+  
+  
+  lines(seq(from=  0, to = 1, length.out = 100), rep(pi/5, times = 100), col = "grey")
+  points(Xf, rep(uhat, times=  nrow(Xf)), pch = 4)
+  points(Xm.init[,1], Xm.init[,2], pch = 20)
+  points(xtilde[1], xtilde[2], pch = 8)
+  
+  if(pt.add != 1){
+    Xm.addtl <- Xm[(min.pts + 1):(min.pts + pt.add -1), , drop = FALSE]
+    points(Xm.addtl[,1], Xm.addtl[,2], pch = 18, col = "blue")
+  }
+  
+  text(0.925, 0.085, labels = bquote(N[M] == .(pt.add -1 + min.pts)))
+  
+}
+plot(1, type = "n", axes = FALSE, xlab = "", ylab = "")
+plot(1, type = "n", axes = FALSE, xlab = "", ylab = "")
+
+par(mar = c(0.001, 0.001, 0.001, 0.001))
+plot(1, type = "n", axes = FALSE, xlab = "", ylab = "")
+
+par(mar=c(0.1,2,0.5,2), xpd=NA, cex = cex.factor)
+plot(1, type = "n", axes = FALSE, xlab = "", ylab = "")
+legend(x = "right", inset = c(-0.05,0.05), legend = c(as.expression("Initial" ~ X[N[M]] * ", " * U[N[M]]), 
+                                                      "IMSPE acquisition", "Min IMSPE", 
+                                                      as.expression(bquote(X[N[F]] * ", " * hat(u))), 
+                                                      as.expression(bquote(u * "*"))), 
+       lty = c(NA, NA, NA, NA, 1), col = c("black", "blue", "black", "black","grey"), 
+       pch = c(20, 18, 8, 4, NA), horiz = TRUE)
+```
+
+Figure \@ref(fig:twodfig) shows KOH-IMSPE surface plots for $N_M =$
+`r paste(pts.add + min.pts - 1, collapse = ", ")`, the location of minimum KOH-IMSPE, the initial
+computer model design, and the points previously added via KOH-IMSPE.  Red colors in the surface indicate smaller KOH-IMSPE values.  The location of
+$u^\star$ is shown as a grey line, which is fixed in each panel.  Field data locations are plotted at $(X_{N_F}, \hat{u})$ for the estimate of $\hat{u}$ found at the given size of $N_M$, which is distinct in each panel.
+Observe that minimum KOH-IMSPE, i.e., $\tilde{u}$ solving Eq. \@ref(eq:prog) is often found near $\hat{u}$, but not always. Distinct exploratory behavior is still observed in the $u$-coordinate, i.e., reflecting the tradeoff between exploration and exploitation suggested by the analysis of derivative information at the end of \S \@ref(kohderiv).  There are also a diversity of $x$-values, marginally.  
+
+# Implementation and benchmarking {#implementation}
+
+Code for all illustrative and 
+benchmarking examples herein is in \textsf{R} and may be found in our Git
+repository [\texttt{https://github.com/blind-pub-repos/koh-imspe}](https://github.com/blind-pub-repos/koh-imspe).   Subroutines found therein liberally borrow 
+from  `laGP` [@gramacy2016lagp] and `hetGP` [@hetGP]
+libraries to make predictions, find MAP estimates of kernel hyperparameters (under Gamma priors detailed later), to build
+covariance matrices, and evaluate integrals when appropriate.  Throughout, inputs $[X,U]$ are scaled to $[0,1]$ to improve numerical stability and simplify code for the required integrals.  Independent $\mathrm{Beta}(2,2)$ priors were used for each element of $u$, throughout, and MAP solutions under a modularized KOH @bayarri2007framework yielded $\hat{u}$ estimates were provided via `optim(..., gr=NULL, method="Nelder-Mead")` [@nelder1965simplex] or `optim(..., gr=NULL, method="Brent")` [@brent2013algorithms] subroutines, as described by @gra:etal:2015
+and demonstrated in @gramacy2020surrogates \S 9.1.
+
+Our implementation of the numerical calculation of closed form Eq. \@ref(eq:kohimspefinal) is faithful to the description detailed in Appendix \@ref(intA).
+To enhance stability, and reduce computation time involved in the search
+of the next acquisition, $[\tilde{x}, \tilde{u}]$ solving,
+\@ref(eq:minimspe), closed form gradients (i.e., non-`NULL` settings `gr`) are
+supplied to `optim(..., gr, method="L-BFGS-B")`. These are also furnished
+in \@ref(intA), including gradients of all $W^{\cdot, \cdot}$ values,
+as required. To further reduce computation time, block matrix
+inversion [@bernstein2009matrix] of $\Sigma^{M,B}$ was utilized to 
+avoid full covariance matrix inversion for every candidate entertained
+by the optimizer. However, block matrix inversion substantially complicates the expressions for gradients.  These 
+additional details are provided in
+Appendix \@ref(blockmatrixA).  To detail with the multi-modality of the KOH-IMSPE surface, our `optim` calls are wrapped in a multi-start scheme initialized at the best inputs found on a discrete LHS
+candidate set.
+
+
+<!-- In implementation, we at first encountered numerical problems, particularly
+related to solving for $[\Sigma^{M,B}]^{-1}$, wrongly leading to computation of
+negative KOH-IMSPE values as well as mismatches between the evaluation of objective and gradient functions by
+`optim()`. 
+To improve numerical stability any matrix inverse which which was not multiplied by a vector within the formulae was found by first solving for the matrix inverse (`Ainv <- solve(A)`), and then averaging the result and its transpose (`Ainv <- (Ainv + t(Ainv))/2`) to ensure the inverse obtained is symmetric.  Any matrix inverse which is multiplied by a vector within the formulae received a different treatment.  In such instances, both the original matrix and the vector to be multiplied after inversion were supplied to `solve()`.  For example, instead of computing `solve(A) %*% b` we calculate `solve(A,b)`.
+The latter function has the advantage of solving for ***$n^2$ terms instead
+of $n^3$*** terms, much improving stability and in some instances reducing computation time.  Big data GPs can further benefit from the similar,
+although more complex, methods in [@gardner2018gpytorch]. Lastly, to
+improve the stability of the `optim()` function we elect to minimize
+$\log(\mathrm{KOH-IMSPE})$ with an appropriate chain rule update to the gradient
+and set `optim(...,  control = list(pgtol = 0.005))`.  These numerical tricks significantly improved evaluations of KOH-IMSPE, gradient functions, and predictive equations. -->
+
+<!--  To make the best of a random start optimization scheme, we first
+evaluate KOH-IMSPE for a number of candidate points generated via LHS.
+We then use `optim()` as a local optimizer on the minimum 7.5% of
+KOH-IMSPE evaluations. The choice of 7.5% is an arbitrarily chosen
+compromise between computation time and thoroughness of the search.  We have found that with the above implementation evaluation and minimization of KOH-IMSPE to be quite fast, and the majority of the computation time in the following examples to be related to the repeated estimation of $\hat{u}$. -->
+
+The remainder of this section describes two synthetic, Monte Carlo (MC), benchmarking exercises where actively learned KOH-IMSPE designs are compared to three space-filling alternatives: LHS, uniformly random, and a sequential IMSPE design for learning the computer model independent of the field data.  We call
+this comparator M-IMSPE, and it is calculated via  `hetGP::IMSPE_optim(..., h=0)$par`.  Everything is re-randomized for each MC iteration.  Initial computer model designs of size $N_{M_0}$ are chosen as random subset of the full LHS design.  To control variability, identical (but random to each MC iteration) field data is shared between each method.  After each active learning acquisition GP hyperparameters and $\hat{U}$ were updated.  A natural
+metric for comparing these designs is $\mathrm{RMSE} = \sqrt{\frac{1}{N}\sum^{N}_{i = 1} (\mu(x_i) - y_i)^2}$
+calculated on the predictions $\mu(x_i)$ from each method against a hold-out
+set of (de-noised) field data outputs $y_1, \dots, y_N$.  These RMSE 
+values are saved after each acquisition, or as each additional element of the
+uniform/LHS is incorporated.  We explore how the the distribution of these
+RMSE values changes as budgets $N_M$ are increased from $N_{M_0}$ up to
+a final stopping budget determined *ex-post* after the best of the method(s)
+seem to have converged. 
+
+
+## Sinusoid {#sinexample}
+
+```{r sinload, echo = FALSE, cache = TRUE}
+
+# Hyerparameters known
+
+
+min.pts <- performance.list$mcparams$min.pts
+max.pts <- performance.list$mcparams$max.pts
+#tests <- performance.list$mcparams$tests
+tests <- c("imspe", "lhs", "random", "m-imspe")
+mc.iters <- ncol(performance.list[[tests[1]]]$rmse)
+```
+Our first benchmarking example was used as the basis of 
+our running illustration, with details provided in \S \@ref(illustration).  We entertained 
+`r mc.iters` MC repetitions using $N_{M_0} = 10$ initial space-filling design points and a final budget of $N_M = 50$.  Priors on GP hyperparameters were: $p(\theta^M) = \mathrm{Gamma}(3/2, 2)$, $p(\theta^B) = \mathrm{Gamma}(3/2, 5)$,
+$p(g_B) = \mathrm{Gamma}(3/2,7)$. For each MC iteration a 
+fixed, evenly spaced grid of 10 field data
+points was evaluated twice, providing $N_F = 20$ unique (randomly generated) values.  RMSE for field predictions was computed using a 100-point LHS test set, common to each method but novel to each MC iteration.
+
+```{r sinusoidsrmse, echo = FALSE, fig.cap = "Left: mean RMSE and 90\\% quantiles for sinusoid data generating mechanism using KOH-IMSPE, LHS, random uniform, and M-IMSPE designs.  Vertical line indicates the $N_M$ for the boxplot on the Right.", cache = TRUE, fig.height = 3.05}
+
+min.pts <- performance.list$mcparams$min.pts
+max.pts <- performance.list$mcparams$max.pts
+#tests <- performance.list$mcparams$tests
+tests <- c("imspe", "lhs", "random", "m-imspe")
+mc.iters <- ncol(performance.list[[tests[1]]]$rmse)
+
+col.pals <- data.frame(imspe = "YlGn", lhs = "PuBu", random = "Oranges")
+col.pals[["m-imspe"]] <- "PuRd"
+
+# iters.use <- sample(1:50, size = 2)
+# 
+# y.lim <- range(performance.list[[50]]$rmse, na.rm = TRUE)
+# 
+# plot(1, type = "n", xlab = bquote("Model Design Size, " * N[m]), ylab = "RMSE", xlim = c(min.pts,max.pts), ylim =y.lim)
+# col.use <- c("blue", "red")
+# lty.use <- c(1,2)
+# 
+# for(i in tests){
+#   for(j in iters.use){
+#     lines(x = 1:50, y = performance.list[[i]]$rmse[,j], col = col.use[tests %in% i], lty = lty.use[iters.use %in% j])
+#   }
+# }
+
+# temp <- performance.list[[10]]$rmse - performance.list[[50]]$rmse
+# 
+# matplot(x = 1:50,temp, type = "l")
+
+# pal <- "Zissou1"
+# 
+# faded.col.bank <- hcl.colors(n = length(tests) + 1, palette = pal, alpha = 0.2)
+# col.bank <- hcl.colors(n = length(tests) + 1, palette = pal)
+# 
+# faded.col.bank <- faded.col.bank[-3]
+# col.bank <- col.bank[-3]
+
+col.index <- 45
+
+col.bank <- c(hcl.colors(100, palette = col.pals$imspe)[col.index], hcl.colors(100, palette = col.pals$lhs)[col.index],
+               hcl.colors(100, palette = col.pals$random)[col.index],  hcl.colors(100, palette = col.pals$`m-imspe`)[col.index])
+faded.col.bank <-  c(hcl.colors(100, palette = col.pals$imspe, alpha = 0.2)[col.index], 
+                     hcl.colors(100, palette = col.pals$lhs, alpha = 0.2)[col.index],
+                     hcl.colors(100, palette = col.pals$random, alpha = 0.2)[col.index],  
+                     hcl.colors(100, palette = col.pals$`m-imspe`, alpha = 0.2)[col.index])
+
+param <- "rmse"
+
+include.quantile <- TRUE
+
+lower.quantile <- upper.quantile <- mean.vals <- data.frame(matrix(NA, ncol = length(tests), nrow = max.pts))
+names(mean.vals) <- names(lower.quantile) <- names(upper.quantile) <- tests
+
+for(i in tests){
+temp.mean <- apply(performance.list[[i]][[param]],1,function(X){mean(X, na.rm = TRUE)})
+temp.quant <- apply(performance.list[[i]][[param]],1, function(X){quantile(X, probs = c(0.05,0.95), na.rm = TRUE)})
+mean.vals[[as.character(i)]] <- temp.mean
+lower.quantile[[as.character(i)]] <- temp.quant[1,]
+upper.quantile[[as.character(i)]] <- temp.quant[2,]
+}
+
+if(include.quantile){
+y.lim <- range(cbind(lower.quantile, upper.quantile),na.rm = TRUE)
+}else{
+  y.lim <- range(mean.vals, na.rm = TRUE)
+}
+
+#y.lim[1] <- 0
+
+layout(mat = matrix(1:2, ncol = 2, nrow = 1), widths = c(0.6,0.3))
+
+par(mar = c(4.8,4.3,2,1.5), cex = 0.8, cex.axis = 0.8, cex.lab = 0.9)
+plot(1, type = "n", xlab = bquote("Model Design Size, " * N[M]), ylab = "RMSE", xlim = c(min.pts,max.pts), ylim = y.lim)
+
+if(include.quantile){
+for(i in 1:length(tests)){
+ polygon(x = c(1:max.pts, max.pts:1), y = c(lower.quantile[,i], upper.quantile[,i][nrow(upper.quantile):1]), 
+         border = NA, col = faded.col.bank[i])
+}
+}
+
+for(i in 1:length(tests)){
+lines(x = 1:max.pts, y = mean.vals[,i], col = col.bank[i])
+}
+
+#legend("topright", lty = 1, legend = c("IMSPE Model Design", "Random Model Design"), col = col.bank)
+
+###########3
+### Boxplot
+##############
+
+iter.use <- apply(mean.vals,1,function(X){
+  if(any(is.na(X))){
+    return(NA)
+  }else{
+  temp <- range(X, na.rm = TRUE)
+  return(abs(temp[2]-temp[1]))
+  }
+})
+
+# iter.use <- apply(cbind(lower.quantile,upper.quantile),1,function(X){
+#   if(any(is.na(X))){
+#     return(NA)
+#   }else{
+#     imspe.dist <- abs(X[3]-X[1])
+#     rand.dist <- abs(X[4]-X[2])
+#     return(abs(rand.dist-imspe.dist))
+#   }
+# })
+iter.use <- which.max(iter.use)
+iter.use <- 25
+abline(v = iter.use, lty = 3)
+
+# iter.use <- apply(cbind(lower.quantile,upper.quantile),1,function(X){
+#   if(any(is.na(X))){
+#     return(NA)
+#   }else{
+#     
+#     return(X[4]- X[3])
+#   }
+# })
+# 
+# iter.use <- which.max(iter.use)
+
+#iter.use <- 47
+
+box.df <- data.frame(matrix(NA, ncol = length(tests), nrow =mc.iters*length(iter.use)))
+names(box.df) <- tests
+
+for(i in tests){
+
+  box.df[[as.character(i)]] <- as.vector(performance.list[[i]][[param]][iter.use,1:mc.iters])
+
+}
+
+par(mar = c(4.8,4.2,2,0.8))
+boxplot(box.df, main = "", xlab = "", ylab = bquote("RMSE, " * N[M] == .(iter.use)), col = col.bank, names =c("KOH\nIMSPE","LHS","Random", "Model\nIMSPE"),las = 2, log = "y")#,ylim = y.lim)
+#axis(1,labels = FALSE)
+#text(x = 1:2, y =par("usr")[3]-1, srt = 45, adj = 1, labels = paste(c("IMSPE","Random")),srt = 45, xpd = TRUE)
+
+```
+
+Figure \@ref(fig:sinusoidsrmse) summarizes these RMSEs in two views.  The left
+panel shows mean RMSE and 90% quantiles over $N_M$. There is high variability
+in the results which may be attributed to the low signal/noise ratio in the
+field data relative to computer model runs.  Even so, after the addition of
+just a few points, KOH-IMSPE clearly outperforms its competitors on average.
+The right panel in the figure provides more resolution on the comparison of
+distributions of RMSE at the particular design size of $N_M = 21$.  Observe
+that the upper quartile of KOH-RMSE is below the median of all other methods.
+Also, there are no extreme RMSE outliers, whereas the others can perform quite
+poorly depending on how they are randomly initialized. 
+
+Interestingly, with this example, there is little difference in performance
+between the model based M-IMSPE and the model independent space-filling
+designs.  Focusing on improving computer model prediction accuracy does not
+always translate into improved field predictions.  Estimation risk is the
+culprit here.  Relying on quality estimators of variance in low-signal
+settings to fine-tune space-fillingness in a design is risky compared to
+targeting space-fillingness geometrically.  In higher-dimensional settings (as
+we shall see momentarily), where notions of space-filling by variance are more
+nuanced, there is more scope for improvement.
+
+
+## Goh/Bastos problem
+
+Our second example comes from @goh2013prediction, which is adapted from @bastos2009diagnostics, but our treatment most closely resembles the slightly simpler setup described in exercise 2 from \S8 of @gramacy2020surrogates.
+It involves a 2d design space ($x$) and 2d calibration parameter ($u$).
+The data-generating mechanism is described as follows, where $u^\star = (0,2, 0.1)$.
+\begin{align*}
+y^M(x,u) &= \left(1-\exp\left(-\frac{1}{2x_2}\right)\right)\frac{1000 u_1 x_1^3 + 1900 x_1^2 + 2092 x_1 + 60}{100 u_2 x_1^3 + 500 x_1^2 + 4x_1 + 20} &
+b(x) &= \frac{10x_1^2 + 4x_2^2}{50x_1x_2 + 10}  \\
+Y^F(x) &= y^M \left( x, u^\star = \lbrack 0.2, 0.1 \rbrack\right) + b(x) + \epsilon & \epsilon &\stackrel{\mathrm{iid}}{\sim} \mathcal{N}(0, 0.25^2)
+\end{align*}
+
+```{r surrogateload, echo = FALSE, cache = TRUE}
+
+performance.list <- surrogatesHW.data
+
+
+min.pts <- performance.list$mcparams$min.pts
+max.pts <- performance.list$mcparams$max.pts
+tests <- c("imspe", "lhs", "random")
+mc.iters <- ncol(performance.list[[tests[1]]]$rmse)
+
+```
+
+We performed `r mc.iters` MC repetitions with $N_{M_0}$ = 30 and the final $N_M = 130$.  Field data was observed at 25 unique locations on an evenly spaced grid in $X\in\lbrack 0 , 1\rbrack ^2$, with two replicates at each for a total of $N_F = 50$.  Priors for hyperparameters were as follows: $p(\theta^M) = \mathrm{Gamma}(3/2, 5/4)$,
+$p(\theta^B) = \mathrm{Gamma}(3/2, 5/2)$,
+$p(g_B) = \mathrm{Gamma}(3/2,1/20)$.  RMSEs were calculated 
+on an out-of-sample (noise-free) testing set on novel 1000-sized 
+LHSs for each repetition. 
+
+(ref:surrogatesrmsecaption) Left: mean RMSE and 90\% quantiles for data generating mechanism from @gramacy2020surrogates (Ch 8, Ex 2) using KOH-IMSPE, LHS, random uniform, and M-IMSPE designs.  Vertical line indicates the $N_M$ for the boxplot on the Right.
+
+```{r surrogatesrmse, echo = FALSE, fig.cap = "(ref:surrogatesrmsecaption)", fig.height = 3.05}
+
+min.pts <- performance.list$mcparams$min.pts
+max.pts <- performance.list$mcparams$max.pts
+#tests <- performance.list$mcparams$tests
+tests <- c("imspe", "lhs", "random", "m-imspe")
+mc.iters <- ncol(performance.list[[tests[1]]]$rmse)
+
+# iters.use <- sample(1:50, size = 2)
+# 
+# y.lim <- range(performance.list[[50]]$rmse, na.rm = TRUE)
+# 
+# plot(1, type = "n", xlab = bquote("Model Design Size, " * N[m]), ylab = "RMSE", xlim = c(min.pts,max.pts), ylim =y.lim)
+# col.use <- c("blue", "red")
+# lty.use <- c(1,2)
+# 
+# for(i in tests){
+#   for(j in iters.use){
+#     lines(x = 1:50, y = performance.list[[i]]$rmse[,j], col = col.use[tests %in% i], lty = lty.use[iters.use %in% j])
+#   }
+# }
+
+# temp <- performance.list[[10]]$rmse - performance.list[[50]]$rmse
+# 
+# matplot(x = 1:50,temp, type = "l")
+
+
+param <- "rmse"
+
+include.quantile <- TRUE
+
+lower.quantile <- upper.quantile <- mean.vals <- data.frame(matrix(NA, ncol = length(tests), nrow = max.pts))
+names(mean.vals) <- names(lower.quantile) <- names(upper.quantile) <- tests
+
+for(i in tests){
+temp.mean <- apply(performance.list[[i]][[param]],1,function(X){mean(X, na.rm = TRUE)})
+temp.quant <- apply(performance.list[[i]][[param]],1, function(X){quantile(X, probs = c(0.05,0.95), na.rm = TRUE)})
+mean.vals[[as.character(i)]] <- temp.mean
+lower.quantile[[as.character(i)]] <- temp.quant[1,]
+upper.quantile[[as.character(i)]] <- temp.quant[2,]
+}
+
+if(include.quantile){
+y.lim <- range(cbind(lower.quantile, upper.quantile),na.rm = TRUE)
+}else{
+  y.lim <- range(mean.vals, na.rm = TRUE)
+}
+
+#y.lim[1] <- 0
+
+layout(mat = matrix(1:2, ncol = 2, nrow = 1), widths = c(0.6,0.3))
+
+par(mar = c(4.8,4.3,2,1.5), cex = 0.8, cex.axis = 0.8, cex.lab = 0.9)
+plot(1, type = "n", xlab = bquote("Model Design Size, " * N[M]), ylab = "RMSE", xlim = c(min.pts,max.pts), ylim = y.lim)
+
+if(include.quantile){
+for(i in 1:length(tests)){
+ polygon(x = c(1:max.pts, max.pts:1), y = c(lower.quantile[,i], upper.quantile[,i][nrow(upper.quantile):1]), 
+         border = NA, col = faded.col.bank[i])
+}
+}
+
+for(i in 1:length(tests)){
+lines(x = 1:max.pts, y = mean.vals[,i], col = col.bank[i])
+}
+
+#legend("topright", lty = 1, legend = c("IMSPE Model Design", "Random Model Design"), col = col.bank)
+
+###########3
+### Boxplot
+##############
+
+iter.use <- apply(mean.vals,1,function(X){
+  if(any(is.na(X))){
+    return(NA)
+  }else{
+  temp <- range(X, na.rm = TRUE)
+  return(abs(temp[2]-temp[1]))
+  }
+})
+
+# iter.use <- apply(cbind(lower.quantile,upper.quantile),1,function(X){
+#   if(any(is.na(X))){
+#     return(NA)
+#   }else{
+#     imspe.dist <- abs(X[3]-X[1])
+#     rand.dist <- abs(X[4]-X[2])
+#     return(abs(rand.dist-imspe.dist))
+#   }
+# })
+iter.use <- which.max(iter.use)
+iter.use <- 50
+abline(v = iter.use, lty = 3)
+
+# iter.use <- apply(cbind(lower.quantile,upper.quantile),1,function(X){
+#   if(any(is.na(X))){
+#     return(NA)
+#   }else{
+#     
+#     return(X[4]- X[3])
+#   }
+# })
+# 
+# iter.use <- which.max(iter.use)
+
+#iter.use <- 47
+
+box.df <- data.frame(matrix(NA, ncol = length(tests), nrow =mc.iters*length(iter.use)))
+names(box.df) <- tests
+
+for(i in tests){
+
+  box.df[[as.character(i)]] <- as.vector(performance.list[[i]][[param]][iter.use,1:mc.iters])
+
+}
+
+par(mar = c(4.8,4.2,2,0.8))
+boxplot(box.df, main = "", xlab = "", ylab = bquote("RMSE, " * N[M] == .(iter.use)), col = col.bank, names =c("KOH\nIMSPE","LHS","Random", "Model\nIMSPE"),las = 2, log = "y")#,ylim = y.lim)
+#axis(1,labels = FALSE)
+#text(x = 1:2, y =par("usr")[3]-1, srt = 45, adj = 1, labels = paste(c("IMSPE","Random")),srt = 45, xpd = TRUE)
+
+```
+
+
+Figure \@ref(fig:surrogatesrmse) shows the results in the same layout as Figure \@ref(fig:sinusoidsrmse).  Observe that from $N_M = 31$ to around $N_M = 40$ there is little discernible difference in RMSE between LHS, random, and M-IMSPE designs.  However, mean RMSE for KOH-IMSPE quickly dominates, and bounds for its 90\% quantile are much narrower at the beginning of each repetition.
+The worst case RMSEs for KOH-IMSPE are almost always better than the median RMSE for the other methods.  Shortly after $N_M = 40$ M-IMSPE shows consistent improvement over the randomized space-filling methods, but M-IMSPE requires the acquisition of another 70 data points before the method is competitive with KOH-IMSPE.  Clearly, model based active learning is advantageous in this example, with KOH-IMSPE quickly providing the largest benefit for improving accuracy of field predictions.
+
+
+# Solvent extraction of rare Earth elements {#reeapp}
+
+```{r sxload, echo = FALSE, cache = TRUE}
+
+performance.list <- sx.data1
+tests <- c("imspe", "lhs", "random", "m-imspe")
+
+for(s in tests){
+  performance.list[[s]]$rmse <- cbind(performance.list[[s]]$rmse, sx.data2[[s]]$rmse, sx.data3[[s]]$rmse)
+  performance.list[[s]]$score <- cbind(performance.list[[s]]$score, sx.data2[[s]]$score, sx.data3[[s]]$score)
+  performance.list[[s]]$uhat1 <- cbind(performance.list[[s]]$uhat1, sx.data2[[s]]$uhat1, sx.data3[[s]]$uhat1)
+  performance.list[[s]]$uhat2 <- cbind(performance.list[[s]]$uhat2, sx.data2[[s]]$uhat2, sx.data3[[s]]$uhat2)
+  performance.list[[s]]$uhat3 <- cbind(performance.list[[s]]$uhat3, sx.data2[[s]]$uhat3, sx.data3[[s]]$uhat3)
+  performance.list[[s]]$uhat4 <- cbind(performance.list[[s]]$uhat4, sx.data2[[s]]$uhat4, sx.data3[[s]]$uhat4)
+  
+  performance.list[[s]]$data <- c(performance.list[[s]]$data, sx.data2[[s]]$data, sx.data3[[s]]$data)
+  
+  
+}
+
+
+
+
+min.pts <- performance.list$mcparams$min.pts 
+max.pts <- performance.list$mcparams$max.pts
+
+mc.iters <- ncol(performance.list[[tests[1]]]$rmse)
+
+total.size <- nrow(performance.list$imspe$data[[1]]$Xf) + nrow(performance.list$imspe$data[[1]]$Xf.test)
+train.size <- nrow(performance.list$imspe$data[[1]]$Xf)
+test.size <- total.size - train.size
+
+```
+
+Here we provide the results of testing the predictive accuracy of a KOH-IMSPE design on our motivating REE problem.  We have a small, $N_F=$ `r toString(total.size)`-sized field data set. For these laboratory tests, three quantities $x$ (coded to $[0,1]^3$) were varied: the ratio of organic to aqueous liquids, and the mols and volume of sodium hydroxide (NaOH) solution used to adjust solution pH.  We focus here on modeling the concentration of lanthanum (La) in the water-based aqueous phase, our output $y$-variable.  Simulation of this quantity requires four (additional) chemical kinetic constants, calibration parameters $u$ (coded to $[0,1]^4$).   Surrogate modeling therefore requires the exploration of a 7d $(x,u)$-space.   Each run outputs elemental concentrations after approximating the solution of a set of differential equations through a Runge-Kutta routine.  The simulator was run at a low fidelity due to the intensive nature of the MC experiment, resulting in a computation time of around 3.65 seconds on an 8-core Apple M1 Pro leveraging Apple vecLib.  Data from the MC experiment was obtained from multiple computers and had total processor time of approximately 3.5 weeks.  Further technical details can be found in Appendix \@ref(sxappendix); our \textsf{R} implementation may be found in our repository along with other materials to reproduce these experiments. 
+
+To manage expectations, we remark that $N_F = 27$ is very small in a
+seven-dimensional space.  This has three consequences: (1) predictions on
+these field data lean heavily on computer model simulations; (2)
+information about promising $u$-values is weak; (3) scope for out-of-sample
+assessment of accuracy is limited and will have high MC error.  Any design
+which is space-filling in $u$ coordinates will perform about as well as
+expected, leaving little scope for improvement with fancier alternatives, like
+KOH-IMSPE.  Nevertheless, we argue that a KOH-IMSPE active learning
+strategy is worthwhile.  
+
+In each trial of our MC experiment, set up similarly to those in \S \@ref(implementation), we randomly held out `r toString(test.size)` field data runs for out-of-sample RMSE assessments, so actually we used $N_F=$ `r toString(train.size)`.  We entertained an initial simulation design of size $N_{M_0}=$ `r toString(min.pts)`, and 
+active learning up to $N_M=$ `r toString(max.pts)`. Independent priors were as follows: $p(\theta_M) = p(\theta^B) = \mathrm{Gamma}\left(3/2, 9/10\right), p(g) = \mathrm{Gamma}\left(3/2,1/20\right)$, and a $\mathrm{Beta}\left(2,2\right)$  on each coordinate of $u$. We performed a total of `r toString(mc.iters)`  MC trials, each with a unique train-test partition and initial LHS.
+
+```{r sxrmse, echo = FALSE, fig.cap = "Left: mean RMSE calculated on a hold-out set for the SX application using KOH-IMSPE, LHS, random uniform, and M-IMSPE designs.  Vertical line indicates the $N_M$ for the boxplot on the Right.", fig.height = 3.05}
+
+
+
+min.pts <- performance.list$mcparams$min.pts
+max.pts <- performance.list$mcparams$max.pts
+
+tests <- c("imspe", "lhs", "random", "m-imspe")
+#mc.iters <- 200#ncol(performance.list[[tests[1]]]$rmse)
+
+
+param <- "rmse"
+
+include.quantile <- FALSE
+
+lower.quantile <- upper.quantile <- mean.vals <- data.frame(matrix(NA, ncol = length(tests), nrow = max.pts))
+names(mean.vals) <- names(lower.quantile) <- names(upper.quantile) <- tests
+
+for(i in tests){
+  
+  # temp.mean <- apply(performance.list[[i]][[param]],1,function(X){
+  # if(all(is.na(X))){
+  #   return(NA)
+  #   }else{
+  #     return(max(X, na.rm = TRUE))}
+  # })
+temp.mean <- apply(performance.list[[i]][[param]][,1:mc.iters],1,function(X){mean(X, na.rm = TRUE)})
+temp.quant <- apply(performance.list[[i]][[param]][,1:mc.iters],1, function(X){quantile(X, probs = c(0.05,0.95), na.rm = TRUE)})
+mean.vals[[as.character(i)]] <- temp.mean
+lower.quantile[[as.character(i)]] <- temp.quant[1,]
+upper.quantile[[as.character(i)]] <- temp.quant[2,]
+}
+
+if(include.quantile){
+y.lim <- range(cbind(lower.quantile, upper.quantile),na.rm = TRUE)
+}else{
+  y.lim <- range(mean.vals, na.rm = TRUE)
+}
+
+layout(mat = matrix(1:2, ncol = 2, nrow = 1), widths = c(0.6,0.3))
+
+par(mar = c(4.8,4.3,2,1.5), cex = 0.8, cex.axis = 0.8, cex.lab = 0.9)
+plot(1, type = "n", xlab = bquote("Model Design Size, " * N[M]), ylab = "RMSE", xlim = c(min.pts,max.pts), ylim = y.lim, xaxt = "n")
+axis(1, )
+
+if(include.quantile){
+for(i in 1:length(tests)){
+ polygon(x = c(1:max.pts, max.pts:1), y = c(lower.quantile[,i], upper.quantile[,i][nrow(upper.quantile):1]), 
+         border = NA, col = faded.col.bank[i])
+}
+}
+
+for(i in 1:length(tests)){
+lines(x = 1:max.pts, y = mean.vals[,i], col = col.bank[i])
+}
+
+#abline(v=  60, lty = 2)
+
+
+
+###########3
+### Boxplot
+##############
+
+iter.use <- apply(mean.vals,1,function(X){
+  if(any(is.na(X))){
+    return(NA)
+  }else{
+  temp <- range(X, na.rm = TRUE)
+  return(abs(temp[2]-temp[1]))
+  }
+})
+
+# iter.use <- apply(cbind(lower.quantile,upper.quantile),1,function(X){
+#   if(any(is.na(X))){
+#     return(NA)
+#   }else{
+#     imspe.dist <- abs(X[3]-X[1])
+#     rand.dist <- abs(X[4]-X[2])
+#     return(abs(rand.dist-imspe.dist))
+#   }
+# })
+iter.use <- which.max(iter.use)
+
+
+abline(v = iter.use, lty = 3)
+
+# iter.use <- apply(cbind(lower.quantile,upper.quantile),1,function(X){
+#   if(any(is.na(X))){
+#     return(NA)
+#   }else{
+#     
+#     return(X[4]- X[3])
+#   }
+# })
+# 
+# iter.use <- which.max(iter.use)
+
+#iter.use <- 47
+
+
+box.df <- data.frame(matrix(NA, ncol = length(tests), nrow =mc.iters*length(iter.use)))
+names(box.df) <- tests
+
+for(i in tests){
+
+  box.df[[as.character(i)]] <- as.vector(performance.list[[i]][[param]][iter.use,1:mc.iters])
+
+}
+
+par(mar = c(4.8,4.2,2,0.8))
+boxplot(box.df, main = "", xlab = "", ylab = bquote("RMSE, " * N[M] == .(iter.use)), col = col.bank, names =c("KOH\nIMSPE","LHS","Random", "Model\nIMSPE"), las = 2, log = "y")#,ylim = y.lim)
+#axis(1,labels = FALSE)
+#text(x = 1:2, y =par("usr")[3]-1, srt = 45, adj = 1, labels = paste(c("IMSPE","Random")),srt = 45, xpd = TRUE)
+
+```
+```{r sxwilcox, echo = FALSE}
+comps <- c("imspe", "m-imspe")
+
+mean.diff <- abs(mean.vals[[comps[1]]] - mean.vals[[comps[2]]])
+
+#wilcox.N <- sort(mean.diff, decreasing  = FALSE, index.return = TRUE, na.last = TRUE)$ix
+#wilcox.N <- wilcox.N[wilcox.N >= 100][1]
+wilcox.N <- iter.use
+
+sx.wilcox <- wilcox.test(performance.list[[comps[1]]][["rmse"]][wilcox.N, 1:mc.iters ], performance.list[[comps[2]]][["rmse"]][wilcox.N, 1:mc.iters], paired = TRUE, alternative = "less")
+
+```
+
+A plot of the average RMSE on the hold-out set is shown in the left panel of Figure \@ref(fig:sxrmse).  Error bars are removed to reduce clutter.  Rather, we report that the signal-to-noise is
+low on these RMSE values, as can be seen in the boxplots in the right (note the
+change of scale on the $y$-axis), for $N_M = 296$.  Nevertheless, it is plain to see in the left panel that, on average, KOH-IMSPE outperforms its comparators.  The boxplots indicate that it is important to assess the statistical significance
+of this visual comparison.  At $N_M = 296$ a one-sided paired Wilcoxon test of KOH-IMSPE versus M-IMSPE (the second-best by mean) rejects
+the null by most conventional levels with a $p$-value of `r signif(sx.wilcox$p.value, digits = 4)`.
+
+```{r sxuhatconv, echo = FALSE, cache = TRUE, fig.cap = "\\textit{top panels:}  Mean path to convergence of $\\hat{u}$ for various designs used in the SX application. Initial and final estimates are circled.  Prior modes are shown as a red dashed line. \\textit{bottom panel:}  Mean and 90\\% quantiles of squared distance between $\\hat{u}$ and $\\tilde{u} \\mid \\hat{u}$ for increasing $N_M$.", fig.height = 5.5}
+myshadowtext <- function(x, y=NULL, labels, col='white', bg='black',
+                         theta= seq(pi/32, 2*pi, length.out=64), r=0.1, cex=1, ... ) {
+  
+  xy <- xy.coords(x,y)
+  fx <- grconvertX(xy$x, to='nfc')
+  fy <- grconvertY(xy$y, to='nfc')
+  fxo <- r*strwidth('A', units='figure', cex=cex)
+  fyo <- r*strheight('A', units='figure', cex=cex)
+  
+  for(i in 1:length(xy$x)){
+    for(j in theta){
+      text(grconvertX(fx[i] + cos(j)*fxo, from="nfc"),
+           grconvertY(fy[i] + sin(j)*fyo, from="nfc"),
+           labels[i], cex=cex, col=bg, ...)
+    }
+    text(xy$x[i], xy$y[i], labels[i], cex=cex, col=col[i], ... ) 
+  }
+  
+}
+
+
+seq.by <- 50
+uhat.mat <- matrix(c(2,1,4,3), ncol = 2, nrow = 2)
+circ.lwd <- 1.2
+shadowtext.cex <- 0.8
+legend.text <- c("KOH-IMSPE ", "LHS ", "Random ", "M-IMSPE ")
+
+pal.add <- floor(length(min.pts:max.pts)*0.4)
+pal.add.top <- floor(length(min.pts:max.pts)*0.5)
+
+#tests <- c("imspe","m-imspe")
+
+col.df <- meanx <- meany <- data.frame(matrix(NA, ncol = length(tests), nrow = max.pts - min.pts + 1))
+names(meanx) <- names(meany) <- names(col.df) <- tests
+
+
+col.df$`m-imspe` <- hcl.colors(n = max.pts - min.pts + 1 + pal.add + pal.add.top , rev = TRUE, palette = col.pals$`m-imspe`)[-c(1:(pal.add ), (max.pts - min.pts + pal.add + 2 ):(max.pts - min.pts + pal.add.top + pal.add + 1))]
+col.df$imspe <- hcl.colors(n = max.pts - min.pts + 1 + pal.add + pal.add.top , rev = TRUE, palette = col.pals$imspe)[-c((1:pal.add), (max.pts - min.pts + pal.add + 2):(max.pts - min.pts + pal.add.top + pal.add + 1))]
+col.df$lhs <- hcl.colors(n = max.pts - min.pts + 1 + pal.add + pal.add.top, rev = TRUE, palette = col.pals$lhs)[-c((1:pal.add), (max.pts - min.pts + pal.add + 2):(max.pts - min.pts + pal.add.top + pal.add + 1))]
+col.df$random <- hcl.colors(n = max.pts - min.pts + 1 + pal.add + pal.add.top, rev = TRUE, palette = col.pals$random )[-c((1:pal.add), (max.pts - min.pts + pal.add + 2):(max.pts - min.pts + pal.add.top + pal.add + 1))]
+
+x.lim <- y.lim <- NA
+for(u in 1:2){
+  
+    uhat.ind <- uhat.mat[,u]
+    uhats <- paste("uhat", uhat.ind, sep = "")
+    }
+
+legend.df <- data.frame(matrix(NA, ncol = length(tests), nrow = 4))
+names(legend.df) <- tests
+
+lheight <- 0.00175*1.75
+lvspace <- 0.00025*3.5
+
+  # c(xl, yb, xr, yt)
+legend.df$imspe <- c(0.543,0.529, 0.585, 0.529 + lheight)
+
+for(s in 2:length(tests)){
+legend.df[[tests[s]]] <- legend.df[[tests[s - 1]]] + c(0, lheight + lvspace, 0, lheight+lvspace)
+}
+
+circ.rad.save <- c(NA, NA)
+
+layout(mat = matrix(c(1,1,2,2,0,3,3,0), ncol = 4, nrow = 2, byrow = TRUE), heights = c(1,0.85), widths = c(0.3,1,1,0.3))
+
+for(u in 1:2){
+  
+  uhat.ind <- uhat.mat[,u]
+  uhats <- paste("uhat", uhat.ind, sep = "")
+  
+      x.lim <- y.lim <- NULL
+    for(s in tests){
+      x.lim <- range(apply(performance.list[[s]][[uhats[1]]],1, mean, na.rm = TRUE)[min.pts:max.pts], x.lim, na.rm = TRUE)
+      y.lim<- range(apply(performance.list[[s]][[uhats[2]]],1, mean, na.rm = TRUE)[min.pts:max.pts], y.lim, na.rm = TRUE)
+      }
+  
+  # c(xl, yb, xr, yt)
+#   if(all(uhat.ind == c(1,3))){
+#   imspe.leg <- c(0.41, 0.547, 0.495, 0.552)
+#   lhs.leg <- c(0.41, 0.54, 0.495, 0.545)
+# }else if(all(uhat.ind == c(1,2))){
+#   imspe.leg <- c(0.42, 0.607, 0.495, 0.612)
+#   lhs.leg <- c(0.42, 0.6, 0.495, 0.605)
+# }
+
+for(s in tests){
+  meanx[[s]] <- apply(performance.list[[s]][[uhats[1]]],1, mean, na.rm = TRUE)[min.pts:max.pts]
+  meany[[s]] <- apply(performance.list[[s]][[uhats[2]]],1, mean, na.rm = TRUE)[min.pts:max.pts]
+}
+
+# x.lim <- range(meanx)
+# y.lim <- range(meany)
+
+
+
+#if(u == 1){
+  
+#}else if(u == 2){
+ # par(pty = "s", cex.main = 0.8, cex.lab = 0.8, cex.axis = 0.8)
+#}
+
+
+if(u == 1){
+  yaxt.ind <-NULL
+  y.lab <- ""#bquote(hat(u)[.(uhat.ind[2])])
+  par( cex = 0.8, cex.main = 0.95, mar = c(3.85,3.45,0.01,0.95), cex.axis = 0.9)
+  y.lim[1] <- y.lim[1] - 0.0092
+  y.lim[2] <- y.lim[2] + 0.0017
+  x.lim[2] <- x.lim[2] + 0.005
+}else if(u == 2){
+  yaxt.ind <- NULL
+  y.lab <- ""
+  par( cex = 0.8, cex.main = 0.95, mar = c(3.85,3.45,0.01,0.95), cex.axis = 0.9)
+}
+
+plot(meanx$imspe, meany$imspe, type=  "n", xlim = x.lim,
+     ylim = y.lim, xlab = bquote(hat(u)[.(uhat.ind[1])]), ylab = y.lab, yaxt = yaxt.ind, main = "")
+     #main = bquote("Mean Estimates of " * hat(u)[.(uhat.ind[1])] * " and " *  hat(u)[.(uhat.ind[2])]))
+
+abline(h = 0.5, col = "red", lty = 2)
+abline(v = 0.5, col = "red", lty = 2)
+if(u ==1){
+  title(ylab= bquote(hat(u)[.(uhat.ind[2])]), line=2.2)
+}else if(u == 2){
+  title(ylab= bquote(hat(u)[.(uhat.ind[2])]), line=2.2)
+} 
+
+txt.plt <- c(1, 51, 151, 251)#seq(from = 1, to = (max.pts - min.pts + 1), by = seq.by)
+
+for(s in tests){
+for(i in 1:(max.pts - min.pts)){
+  segments(meanx[[s]][i], meany[[s]][i], meanx[[s]][i+1], meany[[s]][i+1], col = col.df[[s]][i])
+}
+}
+
+
+
+for(i in txt.plt){
+for(s in tests){
+myshadowtext(meanx[[s]][i], meany[[s]][i], 
+     labels = as.character(i + 49), col = col.df[[s]][i], r = 0.05, cex = shadowtext.cex)
+#myshadowtext(meanx[[s]][txt.plt], meany[[s]][txt.plt], 
+ #    labels = as.character(seq(from = min.pts, to = max.pts, by = seq.by)), col = col.df[[s]][txt.plt], r = 0.05, cex = shadowtext.cex)
+
+}
+}
+circ.rad <- max(0.075*c(x.lim[2] - x.lim[1]))
+for(s in tests){
+plotrix::draw.circle(meanx[[s]][nrow(meanx)], meany[[s]][nrow(meany)], radius= circ.rad, lwd = circ.lwd  ,lty = 2, border = col.df[[s]][nrow(col.df)])
+}
+
+for(s in tests){
+#### Legend
+if(u == 2){
+plotrix::color.legend(xl = legend.df[[s]][1], yb = legend.df[[s]][2], xr = legend.df[[s]][3], yt = legend.df[[s]][4], legend = NA, rect.col= col.df[[s]][nrow(col.df):1])
+text(x = legend.df[[s]][1], y = (legend.df[[s]][2] + legend.df[[s]][4])/2, labels = legend.text[which(tests %in% s)], adj = c(1,0.5), cex = 0.65)
+# plotrix::color.legend(xl = lhs.leg[1], yb = lhs.leg[2], xr = lhs.leg[3], yt = lhs.leg[4], legend = NA, rect.col= col.grad[length(col.grad):1])
+# text(x = lhs.leg[1], y = (lhs.leg[2] + lhs.leg[4])/2, labels = "LHS ", adj = c(1,0.5))
+}
+
+}
+
+if(u == 2){
+  text(x = legend.df[1, ncol(legend.df)], y = legend.df[4, ncol(legend.df)] + lheight, cex = 0.65, labels = bquote(N[M] * " " * 300), adj = c(0.75, 0.5))
+
+text(x = mean(legend.df[c(1,3), ncol(legend.df)]), y = legend.df[4, ncol(legend.df)] + lheight, cex = 0.65, labels = "175", adj = c(0.5, 0.5))
+
+text(x = legend.df[3, ncol(legend.df)], y = legend.df[4, ncol(legend.df)] + lheight, cex = 0.65, labels = "50", adj = c(0.5, 0.5))
+
+#lines(legend.df[c(1,3), ncol(legend.df)], y = legend.df[c(4,4), ncol(legend.df)] + lvspace, lwd = 0.5)
+
+}
+
+
+
+plotrix::draw.circle(meanx[[s]][1], meany[[s]][1], radius= circ.rad, lwd = circ.lwd, lty = 2)
+myshadowtext(meanx[[s]][1], meany[[s]][1], labels = as.character(min.pts), r = 0.05, cex = shadowtext.cex)
+
+}
+
+################################################
+############### distance between utilde and uhat####################################################3
+################################################
+
+
+
+include.quantile <- TRUE
+
+lower.quantile <- upper.quantile <- mean.vals <- data.frame(matrix(NA, ncol = length(tests), nrow = max.pts- min.pts))
+names(mean.vals) <- names(lower.quantile) <- names(upper.quantile) <- tests
+
+#imspe.uhat.list <- performance.list$imspe[c("uhat1", "uhat2", "uhat3", "uhat4")]
+#lhs.uhat.list <- performance.list$lhs[c("uhat1", "uhat2", "uhat3", "uhat4")]
+
+temp.mat <- matrix(NA, nrow = max.pts - min.pts, ncol = mc.iters)
+imspe.utilde.list <- lhs.utilde.list <- list(ut1 = temp.mat, ut2 = temp.mat, ut3 = temp.mat, ut4 = temp.mat)
+
+ temp.mat <- matrix(NA, ncol = mc.iters, nrow = (max.pts-min.pts))
+
+for(i in tests){
+  for(j in 1:mc.iters){
+   # print(j)
+    temp.mat[,j] <- (performance.list[[i]]$data[[j]]$Xm[(min.pts + 1):max.pts,4] - performance.list[[i]]$uhat1[min.pts:(max.pts -1),j])^2 +
+       (performance.list[[i]]$data[[j]]$Xm[(min.pts + 1):max.pts,5] - performance.list[[i]]$uhat2[min.pts:(max.pts -1),j])^2 +
+     (performance.list[[i]]$data[[j]]$Xm[(min.pts + 1):max.pts,6] - performance.list[[i]]$uhat3[min.pts:(max.pts -1),j])^2 +
+     (performance.list[[i]]$data[[j]]$Xm[(min.pts + 1):max.pts,7] - performance.list[[i]]$uhat4[min.pts:(max.pts -1),j])^2
+
+
+  }
+  temp.mean <- apply(temp.mat,1,function(X){mean(X, na.rm = TRUE)})
+  temp.quant <- apply(temp.mat,1, function(X){quantile(X, probs = c(0.05,0.95), na.rm = TRUE)})
+  mean.vals[[as.character(i)]] <- temp.mean
+  lower.quantile[[as.character(i)]] <- temp.quant[1,]
+  upper.quantile[[as.character(i)]] <- temp.quant[2,]
+}
+
+if(include.quantile){
+  y.lim <- range(cbind(lower.quantile, upper.quantile),na.rm = TRUE)
+}else{
+  y.lim <- range(mean.vals, na.rm = TRUE)
+}
+
+#par(mar = c(4.8,4.3,2,1.5), xpd = TRUE)
+par(mar=c(4.8, 3.45, 1.5, 0.95), xpd=TRUE,  cex = 0.8, cex.main = 0.95, cex.axis = 0.9)
+plot(1, type = "n", xlab = bquote("Model Design Size, " * N[M]), ylab = "", xlim = c(min.pts,max.pts-1), ylim = y.lim + c(0,0.1), xaxt = "n")
+axis(1, )
+title(ylab  =bquote("||" * hat(u) - tilde(u) * "||"[2]^2), line = 2.1)
+
+if(include.quantile){
+  for(i in 1:length(tests)){
+    polygon(x = c((min.pts):(max.pts-1), (max.pts-1) :(min.pts)), y = c(lower.quantile[,i], upper.quantile[,i][nrow(upper.quantile):1]),
+            border = NA, col = faded.col.bank[i])
+  }
+}
+
+for(i in 1:length(tests)){
+  lines(x = (min.pts):(max.pts-1), y = mean.vals[,i], col = col.bank[i])
+}
+#lines(c(299,299), y= c(min(lower.quantile[250,]),max(upper.quantile[250,])), lty = 2)
+#abline(h = 0.5)
+#, inset=c(-0.3,0)
+
+legend("top", legend = c("KOH-IMSPE", "LHS", "Random", "M-IMSPE"), fill = col.bank, bty = "n", horiz = TRUE, cex = 0.93)
+
+
+```
+
+```{r sxuhatconv-alt, echo = FALSE, cache = TRUE, fig.cap = "\\textit{top panels:}  Mean path to convergence of $\\hat{u}$ for various designs used in the SX application. Initial and final estimates are circled.  Prior modes are shown as a red dashed line. \\textit{bottom panel:}  Mean and 90\\% quantiles of squared distance between $\\hat{U}$ and $\\tilde{U}|\\hat{U}$ for increasing $N_M$.", fig.height = 5.5, eval = FALSE, include = FALSE}
+myshadowtext <- function(x, y=NULL, labels, col='white', bg='black',
+                         theta= seq(pi/32, 2*pi, length.out=64), r=0.1, cex=1, ... ) {
+  
+  xy <- xy.coords(x,y)
+  fx <- grconvertX(xy$x, to='nfc')
+  fy <- grconvertY(xy$y, to='nfc')
+  fxo <- r*strwidth('A', units='figure', cex=cex)
+  fyo <- r*strheight('A', units='figure', cex=cex)
+  
+  for(i in 1:length(xy$x)){
+    for(j in theta){
+      text(grconvertX(fx[i] + cos(j)*fxo, from="nfc"),
+           grconvertY(fy[i] + sin(j)*fyo, from="nfc"),
+           labels[i], cex=cex, col=bg, ...)
+    }
+    text(xy$x[i], xy$y[i], labels[i], cex=cex, col=col[i], ... ) 
+  }
+  
+}
+
+
+seq.by <- 50
+uhat.mat <- matrix(c(2,1,4,3), ncol = 2, nrow = 2)
+circ.lwd <- 1.2
+shadowtext.cex <- 0.8
+legend.text <- c("KOH-IMSPE ", "LHS ", "Random ", "M-IMSPE ")
+
+pal.add <- floor(length(min.pts:max.pts)*0.25)
+pal.add.top <- floor(length(min.pts:max.pts)*0.30)
+
+#tests <- c("imspe","m-imspe")
+
+col.df <- meanx <- meany <- data.frame(matrix(NA, ncol = length(tests), nrow = max.pts - min.pts + 1))
+names(meanx) <- names(meany) <- names(col.df) <- tests
+
+
+col.df$`m-imspe` <- hcl.colors(n = max.pts - min.pts + 1 + pal.add + pal.add.top , rev = TRUE, palette = col.pals$`m-imspe`)[-c(1:(pal.add ), (max.pts - min.pts + pal.add + 2 ):(max.pts - min.pts + pal.add.top + pal.add + 1))]
+col.df$imspe <- hcl.colors(n = max.pts - min.pts + 1 + pal.add + pal.add.top , rev = TRUE, palette = col.pals$imspe)[-c((1:pal.add), (max.pts - min.pts + pal.add + 2):(max.pts - min.pts + pal.add.top + pal.add + 1))]
+col.df$lhs <- hcl.colors(n = max.pts - min.pts + 1 + pal.add + pal.add.top, rev = TRUE, palette = col.pals$lhs)[-c((1:pal.add), (max.pts - min.pts + pal.add + 2):(max.pts - min.pts + pal.add.top + pal.add + 1))]
+col.df$random <- hcl.colors(n = max.pts - min.pts + 1 + pal.add + pal.add.top, rev = TRUE, palette = col.pals$random )[-c((1:pal.add), (max.pts - min.pts + pal.add + 2):(max.pts - min.pts + pal.add.top + pal.add + 1))]
+
+x.lim <- y.lim <- NA
+for(u in 1:2){
+  
+    uhat.ind <- uhat.mat[,u]
+    uhats <- paste("uhat", uhat.ind, sep = "")
+
+    for(s in tests){
+      x.lim <- range(apply(performance.list[[s]][[uhats[1]]],1, mean, na.rm = TRUE)[min.pts:max.pts], x.lim, na.rm = TRUE)
+      y.lim<- range(apply(performance.list[[s]][[uhats[2]]],1, mean, na.rm = TRUE)[min.pts:max.pts], y.lim, na.rm = TRUE)
+    }
+    }
+
+legend.df <- data.frame(matrix(NA, ncol = length(tests), nrow = 4))
+names(legend.df) <- tests
+
+lheight <- 0.007
+lvspace <- 0.003
+
+  # c(xl, yb, xr, yt)
+legend.df$imspe <- c(0.55,0.352, 0.695, 0.352 + lheight)
+
+for(s in 2:length(tests)){
+legend.df[[tests[s]]] <- legend.df[[tests[s - 1]]] + c(0, lheight + lvspace, 0, lheight+lvspace)
+}
+
+
+layout(mat = matrix(c(1:2,3,3), ncol = 2, nrow = 2, byrow = TRUE), heights = c(1,0.85))
+
+for(u in 1:2){
+  
+  uhat.ind <- uhat.mat[,u]
+  uhats <- paste("uhat", uhat.ind, sep = "")
+  
+  # c(xl, yb, xr, yt)
+#   if(all(uhat.ind == c(1,3))){
+#   imspe.leg <- c(0.41, 0.547, 0.495, 0.552)
+#   lhs.leg <- c(0.41, 0.54, 0.495, 0.545)
+# }else if(all(uhat.ind == c(1,2))){
+#   imspe.leg <- c(0.42, 0.607, 0.495, 0.612)
+#   lhs.leg <- c(0.42, 0.6, 0.495, 0.605)
+# }
+
+for(s in tests){
+  meanx[[s]] <- apply(performance.list[[s]][[uhats[1]]],1, mean, na.rm = TRUE)[min.pts:max.pts]
+  meany[[s]] <- apply(performance.list[[s]][[uhats[2]]],1, mean, na.rm = TRUE)[min.pts:max.pts]
+}
+
+# x.lim <- range(meanx)
+# y.lim <- range(meany)
+
+circ.rad <- min(0.15*c(x.lim[2] - x.lim[1], y.lim[2] - y.lim [1]))
+
+#if(u == 1){
+  
+#}else if(u == 2){
+ # par(pty = "s", cex.main = 0.8, cex.lab = 0.8, cex.axis = 0.8)
+#}
+
+
+if(u == 1){
+  yaxt.ind <-NULL
+  y.lab <- ""#bquote(hat(u)[.(uhat.ind[2])])
+  par( cex = 0.8, cex.main = 0.95, mar = c(3.85,3.45,0.01,0.1), cex.axis = 0.9)
+}else if(u == 2){
+  yaxt.ind <- "n"
+  y.lab <- ""
+  par( cex = 0.8, cex.main = 0.95, mar = c(3.85,2.6,0.01,0.95), cex.axis = 0.9)
+}
+plot(meanx$imspe, meany$imspe, type=  "n", xlim = x.lim,
+     ylim = y.lim, xlab = bquote(hat(u)[.(uhat.ind[1])]), ylab = y.lab, asp = 1, yaxt = yaxt.ind, main = "")
+     #main = bquote("Mean Estimates of " * hat(u)[.(uhat.ind[1])] * " and " *  hat(u)[.(uhat.ind[2])]))
+
+abline(h = 0.5, col = "red", lty = 2)
+abline(v = 0.5, col = "red", lty = 2)
+if(u ==1){
+  title(ylab= bquote(hat(u)[.(uhat.ind[2])]), line=2.2)
+}else if(u == 2){
+  title(ylab= bquote(hat(u)[.(uhat.ind[2])]), line=0.5)
+} 
+
+txt.plt <- c(1, 51, 151, 251)#seq(from = 1, to = (max.pts - min.pts + 1), by = seq.by)
+
+for(s in tests){
+for(i in 1:(max.pts - min.pts)){
+  segments(meanx[[s]][i], meany[[s]][i], meanx[[s]][i+1], meany[[s]][i+1], col = col.df[[s]][i])
+}
+}
+
+
+
+for(i in txt.plt){
+for(s in tests){
+myshadowtext(meanx[[s]][i], meany[[s]][i], 
+     labels = as.character(i + 49), col = col.df[[s]][i], r = 0.05, cex = shadowtext.cex)
+#myshadowtext(meanx[[s]][txt.plt], meany[[s]][txt.plt], 
+ #    labels = as.character(seq(from = min.pts, to = max.pts, by = seq.by)), col = col.df[[s]][txt.plt], r = 0.05, cex = shadowtext.cex)
+
+}
+}
+
+for(s in tests){
+plotrix::draw.circle(meanx[[s]][nrow(meanx)], meany[[s]][nrow(meany)], radius= circ.rad, lwd = circ.lwd  ,lty = 2, border = col.df[[s]][nrow(col.df)])
+}
+
+for(s in tests){
+#### Legend
+if(u == 2){
+plotrix::color.legend(xl = legend.df[[s]][1], yb = legend.df[[s]][2], xr = legend.df[[s]][3], yt = legend.df[[s]][4], legend = NA, rect.col= col.df[[s]][nrow(col.df):1])
+text(x = legend.df[[s]][1], y = (legend.df[[s]][2] + legend.df[[s]][4])/2, labels = legend.text[which(tests %in% s)], adj = c(1,0.5), cex = 0.65)
+# plotrix::color.legend(xl = lhs.leg[1], yb = lhs.leg[2], xr = lhs.leg[3], yt = lhs.leg[4], legend = NA, rect.col= col.grad[length(col.grad):1])
+# text(x = lhs.leg[1], y = (lhs.leg[2] + lhs.leg[4])/2, labels = "LHS ", adj = c(1,0.5))
+}
+
+}
+
+if(u == 2){
+  text(x = legend.df[1, ncol(legend.df)], y = legend.df[4, ncol(legend.df)] + lheight, cex = 0.65, labels = bquote(N[M] * " " * 300), adj = c(0.75, 0.5))
+
+text(x = mean(legend.df[c(1,3), ncol(legend.df)]), y = legend.df[4, ncol(legend.df)] + lheight, cex = 0.65, labels = "175", adj = c(0.5, 0.5))
+
+text(x = legend.df[3, ncol(legend.df)], y = legend.df[4, ncol(legend.df)] + lheight, cex = 0.65, labels = "50", adj = c(0.5, 0.5))
+
+#lines(legend.df[c(1,3), ncol(legend.df)], y = legend.df[c(4,4), ncol(legend.df)] + lvspace, lwd = 0.5)
+
+}
+
+
+
+plotrix::draw.circle(meanx[[s]][1], meany[[s]][1], radius= circ.rad, lwd = circ.lwd, lty = 2)
+myshadowtext(meanx[[s]][1], meany[[s]][1], labels = as.character(min.pts), r = 0.05, cex = shadowtext.cex)
+
+}
+
+################################################
+############### distance between utilde and uhat###########################
+################################################
+
+
+
+include.quantile <- TRUE
+
+lower.quantile <- upper.quantile <- mean.vals <- data.frame(matrix(NA, ncol = length(tests), nrow = max.pts- min.pts))
+names(mean.vals) <- names(lower.quantile) <- names(upper.quantile) <- tests
+
+#imspe.uhat.list <- performance.list$imspe[c("uhat1", "uhat2", "uhat3", "uhat4")]
+#lhs.uhat.list <- performance.list$lhs[c("uhat1", "uhat2", "uhat3", "uhat4")]
+
+temp.mat <- matrix(NA, nrow = max.pts - min.pts, ncol = mc.iters)
+imspe.utilde.list <- lhs.utilde.list <- list(ut1 = temp.mat, ut2 = temp.mat, ut3 = temp.mat, ut4 = temp.mat)
+
+ temp.mat <- matrix(NA, ncol = mc.iters, nrow = (max.pts-min.pts))
+
+for(i in tests){
+  for(j in 1:mc.iters){
+   # print(j)
+    temp.mat[,j] <- (performance.list[[i]]$data[[j]]$Xm[(min.pts + 1):max.pts,4] - performance.list[[i]]$uhat1[min.pts:(max.pts -1),j])^2 +
+       (performance.list[[i]]$data[[j]]$Xm[(min.pts + 1):max.pts,5] - performance.list[[i]]$uhat2[min.pts:(max.pts -1),j])^2 +
+     (performance.list[[i]]$data[[j]]$Xm[(min.pts + 1):max.pts,6] - performance.list[[i]]$uhat3[min.pts:(max.pts -1),j])^2 +
+     (performance.list[[i]]$data[[j]]$Xm[(min.pts + 1):max.pts,7] - performance.list[[i]]$uhat4[min.pts:(max.pts -1),j])^2
+
+
+  }
+  temp.mean <- apply(temp.mat,1,function(X){mean(X, na.rm = TRUE)})
+  temp.quant <- apply(temp.mat,1, function(X){quantile(X, probs = c(0.05,0.95), na.rm = TRUE)})
+  mean.vals[[as.character(i)]] <- temp.mean
+  lower.quantile[[as.character(i)]] <- temp.quant[1,]
+  upper.quantile[[as.character(i)]] <- temp.quant[2,]
+}
+
+if(include.quantile){
+  y.lim <- range(cbind(lower.quantile, upper.quantile),na.rm = TRUE)
+}else{
+  y.lim <- range(mean.vals, na.rm = TRUE)
+}
+
+#par(mar = c(4.8,4.3,2,1.5), xpd = TRUE)
+par(mar=c(4.8, 3.45, 1.5, 0.95), xpd=TRUE,  cex = 0.8, cex.main = 0.95, cex.axis = 0.9)
+plot(1, type = "n", xlab = bquote("Model Design Size, " * N[M]), ylab = "", xlim = c(min.pts,max.pts-1), ylim = y.lim + c(0,0.1), xaxt = "n")
+axis(1, )
+title(ylab  =bquote("||" * hat(u) - tilde(u) * "||"[2]^2), line = 2.1)
+
+if(include.quantile){
+  for(i in 1:length(tests)){
+    polygon(x = c((min.pts):(max.pts-1), (max.pts-1) :(min.pts)), y = c(lower.quantile[,i], upper.quantile[,i][nrow(upper.quantile):1]),
+            border = NA, col = faded.col.bank[i])
+  }
+}
+
+for(i in 1:length(tests)){
+  lines(x = (min.pts):(max.pts-1), y = mean.vals[,i], col = col.bank[i])
+}
+#lines(c(299,299), y= c(min(lower.quantile[250,]),max(upper.quantile[250,])), lty = 2)
+#abline(h = 0.5)
+#, inset=c(-0.3,0)
+
+legend("top", legend = c("KOH-IMSPE", "LHS", "Random", "M-IMSPE"), fill = col.bank, bty = "n", horiz = TRUE, cex = 0.93)
+
+
+```
+
+To further convince ourselves that our KOH-IMSPE designs are doing something interesting, we produced the plots Figure \@ref(fig:sxuhatconv).  These are inspired by Figure \@ref(fig:twodfig), which involved a more straightforward setup with one-dimensional $u$.  Visuals in 4d are more complex.  The top panel of Figure \@ref(fig:sxuhatconv) shows the mean path of $\hat{u}$ as $N_M$ increases.  For every design type, the path line starts as an off-white color when $N_M = 50$, and becomes darker as $N_M$ approaches 300.  Observe that the estimates obtained by the space-filling designs stay near, or take their time venturing away from the initial $\hat{u}$ obtained at $N_M = 50$.  By contrast, KOH-IMSPE quickly converges on a different subset of the space.  Computer model acquisitions focused on improving prediction accuracy in the field improves convergence on $\hat{u}$, which helps reduce RMSE [Figure \@ref(fig:sxrmse)].
+
+The bottom panel of Figure \@ref(fig:sxuhatconv) provides some insight as to why  KOH-IMSPE acquisition leads to more efficient $\hat{u}$ convergence.  This plot provides mean squared distances and 90\% quantiles between $\hat{u}$ and the subsequent acquisition $\tilde{u}$.  It is worth remarking that that LHS, Random, and M-IMSPE do not utilize $\hat{u}$ to find $\tilde{u}$.  Therefore, for these space-filling design types $||\tilde{u} - \hat{u}||^2_2$ is primarily related to how far each element of $\hat{u}$ is from 0.5.  Observe that KOH-IMSPE, on the other hand, first collects points that are quite close to $\hat{u}$, with little variation.  Then, as $N_M$ increases, GP hyperparameters converge, and RMSE decreases, the variation in $||\tilde{u} - \hat{u}||^2_2$ increases.  We attribute this exploratory behavior to weight of the non-zero vectors in Eq. \@ref(eq:dkdutilde).   These increase -- become more important -- with increasing $N_M$, pulling the location of the modes of KOH-IMSPE away from $\hat{u}$.  Such exploratory behavior helps guard against pathologically bad estimates of $\hat{u}$, avoiding a vicious cycles that can plague active learning endeavors, especially in low-signal settings.
+
+
+# Discussion {#discussec}
+
+Active learning is a weapon tool in the computer simulation experiment arsenal.  When computers are involved, the scope for human-free automation is higher than in other settings where experimentation is required.    Design strategies governed by active learning criteria have the potential to reduce data related expenses in the pursuit of achieving a specific goal.  In the KOH calibration setting, it seems sensible to automate the design of a simulation campaign toward low-variance prediction in the field.  Intuitively, the calibration parameter $u$, or  estimates thereof $\hat{u}$, would affect such active learning criteria.  We showed that it does, both technically (via the closed form of a variance-based acquisition criteria, KOH-IMSPE) and empirically in several illustrative and real-world examples.
+
+There are, of course, other design goals that might be of interest, i.e.,
+beyond reduced predictive variance.  We remarked in \S \@ref(introduction) that
+identifiability/confounding is a concern with KOH.  It may be that such
+confounding can be diminished, or controlled, with the right active learning
+criteria.  This could be an important target of future research.  Other
+potential add-ons might include batch acquisition for distributed
+simulation environments.  It is natural to wonder if similar active learning
+principles could fruitfully be deployed to augment field data campaigns.  Our
+initial experiments with this setup, admittedly using a cruder numerical
+IMSPE calculation, suggested a much lower return on investment in this
+setting.  Even in highly stylized examples, we could not detect any difference
+(visual or empirical) between such designs and ordinary space-filling ones.  There may be less scope for human-free automation in the design of field experiments in the KOH setting.  However, an interesting twist to batch KOH-IMSPE would be the joint augmentation of both field and simulator data, for cases when more simulations can be run concurrent to the collection of additional field data.  In this setup there may be further scope for automating aspects of design.
+
+Turning now to our motivating application, use of KOH-IMSPE for active learning of SX processes has the potential to lead to insights for improving the extraction and concentration of the REEs necessary to provide widespread adoption of green technologies.  Results from our study show that KOH-IMSPE has the capability to improve predictive accuracy of SX equilibrium concentrations utilizing less simulator data.  The SX application illustrated is relatively simple, as only one REE was modeled, but nonetheless shows promise.  Incorporating all REEs would lead to an even higher dimensional calibration parameter space.  A more complex model would require more real/field data experimentation.
+
+In the SX example, we had some difficulties evaluating the gradient of KOH-IMSPE in a numerically stable fashion.  We were able to work around these with careful engineering, but these "hacks" may compromise the portability of our subroutines.  Using better conditioned Matérn covariance functions [@stein1999interpolation] may provide more stable gradient evaluations. 
+<!-- The complexities of using KOH-IMSPE with heteroskedastic GPs [@binois2019replication] for applications of stochastic simulators or heteroskedastic field data warrants further research. -->
+Bayesian inference of $\hat{u}$ coupled with an efficient evaluation of KOH-IMSPE criteria may provide improvements due to to further uncertainty quantification of the calibration parameter in small field data settings.  Additionally, Bayesian optimization [@jones1998efficient] could be used to maximize the likelihood of $\hat{u}$ while probing the simulator input space, possibly allowing for reduced data requirements for convergence on $\hat{u}$.  For simulators with multiple outputs a KOH-IMSPE criteria used with a cokriging model [@ver1998constructing] may be able to leverage larger amounts of information at each point for improved convergence of the calibration parameter.
+
+## Acknowledgements {-}
+
+This work supported, in part, by the U.S. Department of Energy, Office of Science, Office of
+Advanced Scientific Computing Research and Office of High Energy Physics,
+Scientific Discovery through Advanced Computing (SciDAC) program under Award
+Number 0000231018; and by National Science Foundation award CMMI-2152679.
+
+
+<!-- # Declaration of Interest Statement {-}
+The authors report there are no competing interests to declare. -->
+
+\bibliography{pubdocs/bib}
+
+# (APPENDIX) Appendix {.unnumbered}
+
+# Kennedy and O'Hagan IMSPE Derivations
+
+## Integrals {#intA}
+
+Details are provided for evaluating the integrals required to calculate
+KOH-IMSPE in closed form when the GPs used in modeling the computer
+simulation and bias function both utilize a separable Gaussian covariance kernel.  The provided derivations are for a uniformly rectangular $X$ space with inputs scaled to $[0,1]^p$ and a model conditioned on a point estimate of $\hat{U}$.  The form for the integral is shown as \@ref(eq:int-wrt-x) multiplied by \@ref(eq:int-wrt-u), and can also be noted as the Hadamard product $W^{\alpha, \beta}(X) \circ W^{\alpha, \beta}(U)$ Below, the variables $\alpha,\beta$ express the combinations of the model and bias covariance kernels $(M,M); (M,B); (B,B)$, $i,j$ indexes all data locations from 1 to $N_F + N_M$, and $x,\hat{u}$ without an $i,j$ subscript is the field data predictive location.
+\begin{align}
+w^{\alpha, \beta}_{i,j} &= \int_{[0,1]^p} k^{\alpha}([x_i, u_i], [x, \hat{u}])k^{\beta}([x, \hat{u}], [x_j, u_j])dx_1, \dots dx_p \notag \\
+&= \prod_{l = 1}^p \int_0^1 \exp\left(-\frac{(x_{i,l} - x_l)^2}{\theta^\alpha_l}\right)\exp\left(-\frac{(x_{j,l} - x_l)^2}{\theta^\beta_l}\right)dx_l (\#eq:int-wrt-x)\\
+&\qquad\quad\times\prod_{l = p + 1}^d \exp\left(-\frac{(u_{i,l} - \hat{u}_l)^2}{\theta^\alpha_l}\right)\exp\left(-\frac{(u_{j,l} - \hat{u}_l)^2}{\theta^\beta_l}\right) (\#eq:int-wrt-u)
+\end{align}
+To make notation simple and more compact, we do not state the bounds of integration going forward, and integrals should always be assumed to be evaluated from 0 to 1.  This important note is not repeated again and again below in order to make the text more compact.  For compactness we assume that $N_M$ contains the point augmented to the collected data for a sequential design application in this section.
+
+Derivatives are provided for a gradient based search of the additional computer model point $[\tilde{x},\tilde{u}]$ which minimizes KOH-IMSPE.  The expressions provided must be multiplied by remaining $d-1$ elements of the products \@ref(eq:int-wrt-x) and \@ref(eq:int-wrt-u).  For example, for $l = 2 = p; d = 3$ find $\frac{\partial W^{M,M}}{\partial \tilde{x}_2} = W^{M,M}(X_1) \circ \frac{\partial W^{M,M}(X_2)}{\partial \tilde{x}_2} \circ W^{M,M}(U_1)$, while only the expression for $\frac{\partial W^{M,M}(X_2)}{\partial \tilde{x}_2}$ is provided below.
+
+### $W^{M,M}$
+
+The integral to be solved in order to find $W^{M,M}$:
+\begin{equation}
+W^{M,M}  =  \begin{bmatrix}
+\int k([X_{N_F}, \hat{U}],[x, \hat{u}])k([x, \hat{u}],[X_{N_F},\hat{U}]) dx & \int k([X_{N_F}, \hat{U}], [x, \hat{u}])k([x,\hat{u}], [X_{N_M}, U_{N_M}])  dx\\
+\int k([X_{N_M}, U_{N_M}], [x, \hat{u}])k([x,\hat{u}], [X_{N_F}, \hat{U}]) dx & \int k([X_{N_M}, U_{N_M}], [x,\hat{u}])k([x, \hat{u}], [X_{N_M}, U_{N_M}]) dx
+\end{bmatrix} (\#eq:wmmblockmat)
+\end{equation}
+The $(i,j)^\mathrm{th}$ element of $w^{M,M}$ corresponding to x and \@ref(eq:int-wrt-x) can be found as:
+\begin{equation}
+w^{M,M}_{i,j}(x) = \prod_{l = 1}^p \frac{\sqrt{2\pi \theta^M_l}}{4}\exp\left(- \frac{(x_{i,l} - x_{j,l})^2}{2\theta_l^M} \right)\left(\mathrm{erf}\left(\frac{2-(x_{i,l} + x_{j,l})}{\sqrt{2\theta_l^M}}\right) + \mathrm{erf}\left(\frac{x_{i,l} + x_{j,l}}{\sqrt{2\theta_l^M}}\right)\right)
+(\#eq:wmmint)
+\end{equation}
+Where $\mathrm{erf}()$ is the Gauss error function.  Elements of $W^{M,M}$ related to $U$ space and the product \@ref(eq:int-wrt-u) can be found as \@ref(eq:wmm-wrtu), where $W^{M,M} = W^{M,M}(X) \circ W^{M,M}(U)$, and $J_{N_F \times N_F}$ is a square matrix of ones with a dimension of $N_F$
+\begin{equation}
+W^{M,M}(U) = 
+\begin{bmatrix}
+J_{N_F \times N_F} & 1_{N_F} k(\hat{u}, U_{N_M})\\
+k(U_{N_M}, \hat{u}) 1^{\top}_{N_F} & k(U_{N_M}, \hat{u})k(\hat{u}, U_{N_M})
+\end{bmatrix}
+(\#eq:wmm-wrtu)
+\end{equation}
+Differentiation of $W^{M,M}$ is required to supply the optimization routine a gradient for minimization.  Note, that only the last column and row of $\frac{\partial W^{M,M}}{\partial[\tilde{x},\tilde{u}]_l} \ \forall:  l$ are non-zero.  Differentiating with respect to an $\tilde{x}_l$ changes the $l^\mathrm{th}$ element of the product in \@ref(eq:wmmint) into the following:
+\begin{equation}
+\begin{split}
+\frac{\partial w^{M,M}(x_{i,l}, \tilde{x}_l)}{\partial \tilde{x}_l} &= \sqrt{\frac{\pi}{2}}\exp\left(-\frac{(x_{i,l} - \tilde{x}_l)^2}{2\theta^M_l}\right)\left((x_{i,l} - \tilde{x}_l)\frac{ \mathrm{erf}\left( \frac{2-(x_{i,l}-\tilde{x}_l)}{\sqrt{2\theta^M_l}}\right) + \mathrm{erf}\left(\frac{x_{i,l}+\tilde{x}_l}{\sqrt{2\theta^M_l}}\right)}{2\sqrt{\theta^M_l}} + \right. \\ 
+&\left. \phantom{\frac{ \mathrm{erf}\left( \frac{2-(x_{i,l}-\tilde{x}_l)}{\sqrt{2\theta^M_l}}\right)}{2\sqrt{\theta^M_l}}} \frac{1}{2}\sqrt{\frac{2}{\pi}}\left(\exp\left(-\frac{(x_{i,l}+\tilde{x}_l)^2}{2\theta^M_l}\right) - \exp\left(-\frac{(2-x_{i,l}-\tilde{x}_l)^2}{2\theta^M_l}\right)\right)\right)
+\end{split}
+\notag
+\end{equation}
+ However, for the
+case where $x_{i,l} = \tilde{x}_l$ (the bottom right corner of $W^{M,M}$), instead the derivative in
+\@ref(eq:dwbbxtilxtil) should be used.
+\begin{equation}
+\frac{\partial w^{M,M}(\tilde{x}_l, \tilde{x}_l)}{\partial \tilde{x}_l} = \exp\left(-\frac{2\tilde{x}_l^2}{\theta^M_l}\right) - \exp\left(-\frac{2(\tilde{x}_l-1)^2}{\theta^M_l}\right)
+(\#eq:dwbbxtilxtil)
+\end{equation}
+Differentiation with respect to $U$ space produces the following matrix, which similar to \@ref(eq:wmm-wrtu) should be element wise multiplied by the remaining functions evaluated to create $W^{M,M}$ related to the remaining $d-1$ dimensions of the input space.
+\begin{equation}
+\frac{\partial W^{M,M}(U)}{\partial \tilde{u}_l}=
+\begin{bmatrix}
+0_{N_F \times N_F} & 0_{(N_F - 1) \times (N_M -1)} & 1_{N_F} \frac{\partial k(\hat{u}, \tilde{u})}{\partial \tilde{u}_l}\\
+0_{(N_M -1) \times N_F} & 0_{(N_M - 1)\times (N_M -1)} & k(U_{N_M -1}, \hat{u})\frac{\partial k(\hat{u}, \tilde{u})}{\partial \tilde{u}_l}\\
+1_{N_F}^{\top} \frac{\partial k(\tilde{u}, \hat{u})}{\partial \tilde{u}_l} & k(\hat{u}, U_{N_M -1})\frac{\partial k( \tilde{u}, \hat{u})}{\partial \tilde{u}_l} & \frac{\partial k(\tilde{u}, \hat{u})}{\partial \tilde{u}_l}k(\hat{u}, \tilde{u}) + k(\tilde{u}, \hat{u})\frac{\partial k(\hat{u}, \tilde{u})}{\partial \tilde{u}_l}
+\end{bmatrix}
+(\#eq:dwmm-du)
+\end{equation}
+
+### $W^{M,B}$
+
+\begin{equation}
+W^{M,B}  =  \begin{bmatrix}
+\int k([X_{N_F}, \hat{U}], [x, \hat{u}])k^B(x, X_{N_F})dx & 0_{N_F \times N_M}\\
+\int k([X_{N_M}, U_{N_M}], [x, \hat{u}])k^B(x, X_{N_F})dx & 0_{N_M \times N_M}
+\end{bmatrix}
+(\#eq:wmbblockmat)
+\end{equation}
+Solving for \@ref(eq:wmbblockmat) requires particular attention to the fact that $k$ and $k^B$ have
+different lengthscale values ($\theta^M_l$ and $\theta^B$) for the same dimension. The result is shown below, where $x_j$ is always taken to be to the field data and from the bias kernel.
+\begin{equation}
+\begin{split}
+w^{M,B}_{i,j}(x) &= \prod_{l = 1}^p \exp \left(-\frac{(x_{j,l}-x_{i,l})^2}{\theta^B_l + \theta_l^M}\right)\left(\frac{1}{2}\sqrt{\pi\left(\frac{1}{\theta_l^M}+\frac{1}{\theta^B_l}\right)^{-1}}\right) \left(\mathrm{erf}\left(\frac{\left(\frac{\theta^B_l x_{i,l} + \theta_l^M x_{j,l}}{\theta^B_l + \theta_l^M}\right)}{\sqrt{\left(\frac{1}{\theta_l^M} + \frac{1}{\theta^B_l}\right)^{-1}}}\right)\right. \\
+& \qquad - \left.\mathrm{erf}\left(\frac{\left(\frac{\theta^B_l x_{i,l} + \theta_l^M x_{j,l}}{\theta^B_l + \theta_l^M}\right)-1}{\sqrt{\left(\frac{1}{\theta_l^M} + \frac{1}{\theta^B_l}\right)^{-1}}}\right)\right)
+\end{split}
+(\#eq:wmbint)
+\end{equation}
+Functions related to $U$ space can be found as\@ref(eq:wmbu), where $W^{M,B} = W^{M,B}(X) \circ W^{M,B}(U)$, and $J_{N_F \times N_F}$ is a square matrix of ones with a dimension of $N_F$, 
+\begin{equation}
+W^{M,B}(U)=
+\begin{bmatrix}
+J_{N_F \times N_F} & 0_{N_F \times N_M}\\
+k(U, \hat{u})1^{\top}_{N_F} & 0_{N_M \times N_M}
+\end{bmatrix}
+(\#eq:wmbu)
+\end{equation}
+
+Differentiation of \@ref(eq:wmbint) with respect to $\tilde{x}$ for
+gradient based minimization of KOH-IMSPE produces:
+\begin{equation}
+\begin{split}
+&\frac{\partial w^{M,B}(\tilde{x}_l,x_{j,l})}{\partial \tilde{x}_l} = \\
+&\frac{e^{-\frac{(\tilde{x}_l - x_{j,l})^2}{\theta^B_l + \theta_l^M}}}{\theta_l^M + \theta^B_l} \left(\sqrt{\pi \left(\frac{1}{\theta^B_l} + \frac{1}{\theta_l^M}\right)^{-1}}(x_{j,l} -\tilde{x}_l)\left(\mathrm{erf}\left(\frac{\left(\frac{\theta_l^M x_{j,l} + \theta^B_l \tilde{x}_l}{\theta_l^M + \theta^B_l}\right)}{\sqrt{\left(\frac{1}{\theta_l^M} + \frac{1}{\theta^B_l}\right)^{-1}}}\right) - \mathrm{erf}\left(\frac{\left(\frac{\theta_l^M x_{j,l} + \theta^B_l \tilde{x}_l}{\theta_l^M + \theta^B_l}\right)-1}{\sqrt{\left(\frac{1}{\theta_l^M} + \frac{1}{\theta^B_l}\right)^{-1}}}\right)\right) + \right. \\
+& \left. \phantom{\mathrm{erf}\left(\frac{\left(\frac{\theta_l^M x_{j,l} + \theta^B_l \tilde{x}_l}{\theta_l^M + \theta^B_l}\right)}{\sqrt{\left(\frac{1}{\theta_l^M} + \frac{1}{\theta^B_l}\right)^{-1}}}\right)} \theta^B_l \left(e^{-\frac{\left(\frac{1}{\theta_l^M} + \frac{1}{\theta^B_l}\right)(\theta_l^M x_{j,l} + \theta^B_l \tilde{x}_l)^2}{(\theta_l^M + \theta^B_l)^2}} - e^{-\left(\frac{1}{\theta_l^M} + \frac{1}{\theta^B_l}\right)\left(\frac{\theta_l^M x_{j,l} + \theta^B_l \tilde{x}_l}{\theta_l^M + \theta^B_l} - 1\right)^2}\right)\right)
+\end{split}
+\notag
+\end{equation}
+Once again, because of the form of \@ref(eq:wmbblockmat), $x_j$ only corresponds to field data from the bias covariance functions
+
+\begin{equation}
+\frac{\partial W^{M,B}(U)}{\partial \tilde{u}_l}=
+\begin{bmatrix}
+0_{N_F \times N_F} & 0_{N_F \times (N_M)}\\
+0_{(N_M - 1) \times N_F} & 0_{(N_M -1) \times N_M}\\
+\frac{\partial k(\tilde{u}, \hat{u})}{\partial \tilde{u}_l} 1^{\top}_{N_F} & 0_{1 \times 1}
+\end{bmatrix}
+\notag
+\end{equation}
+
+
+### $W^{B,B}$
+
+\begin{equation}
+W^{B,B}=
+\begin{bmatrix}
+\int k^{B}(X_{N_F}, x)k^{B}(x,X_{N_F}) dx & 0_{N_F \times N_M}\\
+0_{N_M, \times N_F} & 0_{N_M \times N_M}
+\end{bmatrix}
+\notag
+\end{equation}
+
+
+Evaluation of all entries in $W^{B,B}$ is only related to $X$ space. For
+the Gaussian kernel, the integral required for evaluation is equivalent
+to \@ref(eq:wmmint).  In the search to find the additional data point
+$\tilde{x}$ which minimizes KOH-IMSPE,
+$\frac{\partial W^{B,B}}{\partial \tilde{x}} = 0$.  If acquiring field data while utilizing the information obtained from a computer simulator, derivatives would be equivalent to those for $W^{M,M}(X)$.
+
+## Block Matrix Inversion {#blockmatrixA}
+
+Let:
+
+\begin{equation}
+\Sigma^{M,B}_{N_F + N_M + 1} = 
+\begin{bmatrix}
+\Sigma^{M,B}_{N_F + N_M} & \nu_M \tilde{k}\\[5pt]
+\nu_M \tilde{k}^{\top} & \nu_M k([\tilde{x}, \tilde{u}])
+\end{bmatrix}
+\notag
+\end{equation}
+
+Where:
+
+\begin{equation}
+\tilde{k} =
+\begin{bmatrix}
+k([X_{N_F}, \hat{U}], [\tilde{x}, \tilde{u}])\\[5pt]
+k([X_{N_M}, U_{N_M}], [\tilde{x}, \tilde{u}])
+\end{bmatrix}
+\end{equation}
+
+We can then find $[\Sigma_{N_F + N_M + 1}^{M,B}]^{-1}$ as such:
+
+\begin{equation}
+[\Sigma_{N_F + N_M + 1}^{M,B}]^{-1} =
+\begin{bmatrix}
+\kern2pt [\Sigma^{M,B}_{N_F + N_M}]^{-1} + \frac{1}{b}\nu_M^2[\Sigma^{M,B}_{N_F + N_M}]^{-1}\tilde{k}\tilde{k}^{\top}[\Sigma^{M,B}_{N_F + N_M}]^{-1} & -\frac{1}{b}\nu_M[\Sigma^{M,B}_{N_F + N_M}]^{-1}\tilde{k}\kern2pt\\[5pt]
+\kern2pt -\frac{1}{b}\tilde{k}^{\top}[\Sigma^{M,B}_{N_F + N_M}]^{-1} & \frac{1}{b}\kern2pt
+\end{bmatrix}
+(\#eq:bmatrixinv)
+\end{equation}
+
+Where $b = \nu_M k([\tilde{x}, \tilde{u}]) - \nu_M^2 \tilde{k}^{\top}[\Sigma^{M,B}_{N_F + N_M}]^{-1}\tilde{k}$.
+
+When minimizing KOH-IMSPE, it is necessary to differentiate $[\Sigma^{M,B}_{N_F + N_M}]^{-1}$, and therefore the differential must be pushed through the block matrix inverse form \@ref(eq:bmatrixinv) in order to reduce the expense of gradient evaluations.  Differentiating each of the blocks individually provides the following results via the use of the chain rule.  It is important to note, that when $\frac{\partial[\Sigma^{M,B}_{N_F + N_M}]^{-1}}{[\tilde{x}, \tilde{u}]_l}$ can be found in closed form, the identity $\frac{\partial U(x)^{-1}}{\partial x} = -U(x)^{-1} \frac{\partial U(x)}{\partial x}U(x)^{-1}$ is not necessary in \@ref(eq:imspediff).
+\begin{equation}
+\frac{\partial b^{-1}}{\partial [\tilde{x}, \tilde{u}]_l} = b^{-2}\nu_M^2\left(\tilde{k}^{\top}[\Sigma^{M,B}_{N_F + N_M}]^{-1}\frac{\partial \tilde{k}}{\partial [\tilde{x}, \tilde{u}]_l} + \frac{\partial \tilde{k}^{\top}}{\partial [\tilde{x}, \tilde{u}]_l}[\Sigma^{M,B}_{N_F + N_M}]^{-1} \tilde{k}\right) 
+\notag
+\end{equation}
+
+\begin{equation}
+\begin{split}
+\frac{\partial \left(b^{-1}\nu_M[\Sigma^{M,B}_{N_F + N_M}]^{-1}\tilde{k}\tilde{k}^{\top}[\Sigma^{M,B}_{N_F + N_M}]^{-1}\right)}{\partial [\tilde{x}, \tilde{u}]_l} &= b^{-1}\nu_M^2[\Sigma^{M,B}_{N_F + N_M}]^{-1}\tilde{k}\frac{\partial \tilde{k}^{\top}}{\partial[\tilde{x}, \tilde{u}]_l}[\Sigma^{M,B}_{N_F + N_M}]^{-1} \\
+& \qquad + \frac{\partial b^{-1}}{\partial [\tilde{x}, \tilde{u}]_l} \nu_M^2[\Sigma^{M,B}_{N_F + N_M}]^{-1}\tilde{k}\tilde{k}^{\top}[\Sigma^{M,B}_{N_F + N_M}]^{-1} \\
+& \qquad + b^{-1}\nu_M^2[\Sigma^{M,B}_{N_F + N_M}]^{-1}\frac{\partial \tilde{k}}{\partial [\tilde{x}, \tilde{u}]_l}\tilde{k}^{\top}[\Sigma^{M,B}_{N_F + N_M}]^{-1}
+\end{split}
+\notag
+\end{equation}
+
+\begin{equation}
+\frac{\partial \left(b^{-1}\nu_M[\Sigma^{M,B}_{N_F + N_M}]^{-1}\tilde{k}\right)}{\partial[\tilde{x}, \tilde{u}]_l} = \frac{\partial b^{-1}}{\partial [\tilde{x}, \tilde{u}]_l} \nu_M[\Sigma^{M,B}_{N_F + N_M}]^{-1}\tilde{k} + b^{-1}\nu_M[\Sigma^{M,B}_{N_F + N_M}]^{-1}\frac{\partial \tilde{k}}{\partial [\tilde{x}, \tilde{u}]_l}
+\notag
+\end{equation}
+
+\begin{equation}
+\frac{\partial \left(b^{-1}\nu_M\tilde{k}^{\top}[\Sigma^{M,B}_{N_F + N_M}]^{-1}\right)}{\partial [\tilde{x}, \tilde{u}]_l} = \left(\frac{\partial \left(b^{-1}\nu_M[\Sigma^{M,B}_{N_F + N_M}]^{-1}\tilde{k}\right)}{\partial[\tilde{x}, \tilde{u}]_l}\right)^{\top}
+\notag
+\end{equation}
+
+# Solvent Extraction Modeling {#sxappendix}
+
+## Field data experimental methods
+
+To generate field data, shake tests were conducted, where an aqueous solution containing various ions of interest were mixed with a liquid organic phase.  During this time, ions in each phase react and are transported between phases based on the solubility of the reactants at equilibrium.  The phases then disengage over time (think mixing oil and water), and a sample of the aqueous solution can be obtained for analysis via Inductively coupled plasma mass spectrometry (ICP-MS) to obtain an assay of the concentration of elements remaining in the aqueous solution.
+
+To obtain a varying data set the ratios of the volume of organic to aqueous liquids (O/A) were varied, along with the equilibrium pH.  The O/A ratios tested are 0.1 and 1.  To vary the aqueous equilibrium pH after reacting with an organophosphorus acid, additions of 5\% and 50\% (m/m) sodium hydroxide (NaOH) solutions were used.  The independent variables related to NaOH addition then become mols of NaOH and volume of NaOH solution added to the mixture.  For modeling purposes the equilibrium pH is later treated as a variable dependent on the NaOH additions.  Target equilibrium pH values used are 1.5, 2.0, 2.5, 3.0, and 3.5.
+
+Constants between experiments include the initial elemental concentrations and pH of the aqueous solution, the initial content of the organic phase, and temperature.  A single batch of the aqueous solution was mixed by dissolving a mixture of rare earth oxides in hydrochloric acid.  The same aqueous solution was used for all experiments,  The pH of the solution used as a feed to the process averaged to be 1.99.  Multiple samples were drawn from the solution and pH was checked over time to ensure consistency.  Similarly, for the organic phase the organic dilutant Elixore 205 was mixed with 2-ethylhexyl phosphonic acid mono-2-ethylhexyl ester (EHEHPA) such that the molarity of EHEHPA in the fresh organic phase is 1.053 mol/L.
+
+## Simulation
+
+A simulator for the chemical reaction was written in the \textsf{R} programming language, where a set of differential equations was solved using a Runge-Kutta routine.  The set of differential equations specified are assumed to be governed by the law of mass action [@espenson1995chemical], shown as Equation set \@ref(eq:law-ma).  The law of mass action provides a means for writing a set of differential equations given the concentrations $R_i$ and stochiometric coefficients $r_i$ of the reactants, and reaction kinetic constants. \begin{equation}
+\begin{split}
+r_1R_1 + r_2R_2 + \dots + r_mR_m \overset{k}{\rightarrow} p_1P_1 + p_2P_2 + \dots + p_nP_n )\\
+r = -\frac{1}{r_i}\frac{d\lbrack R_i \rbrack}{dt} = \frac{1}{p_j}\frac{d\lbrack P_j\rbrack}{d_t} = k \prod_{l = 1}^m \lbrack R_l \rbrack^{r_l}
+\end{split}
+(\#eq:law-ma)
+\end{equation}
+Although data for a variety of elements is available, we choose to simplify modeling in testing the utility of KOH-IMSPE by only focusing on sodium (Na) and Lanthanum (La) concentrations.  The reactions specified for simulation are based on the stated reaction of a rare earth element with an organophosphorus acid in @gupta1992extractive.  The disassociation of EHEHPA when reacting with Na$^{+1}$ is assumed to be similar to when reacting with rare earth elements.  Reversible reactions used are shown as Equation set \@ref(eq:sxreactions), where the subscript aq and org denote presence in the aqueous or organic phase, $\mathrm{H_2A_2}$ is the organophosporus acid EHEHPA, $\mathrm{HA_2}^-$ is the conjugate base, $\mathrm{H}^+$ and a hydrogen ion.\begin{equation}
+\begin{split}
+[\mathrm{La}^{3+}]_{\mathrm{aq}} + 3\lbrack \mathrm{H}_2\mathrm{A}_2\rbrack_{\mathrm{org}} &\overset{k^\mathrm{La}_{-}}{\underset{k^\mathrm{La}_{+}}{\rightleftharpoons}} \lbrack \mathrm{La}(\mathrm{HA}_2)_3\rbrack_{\mathrm{org}} + 3[\mathrm{H}^+]_\mathrm{aq}\\
+[\mathrm{Na}^+]_\mathrm{aq} + \lbrack \mathrm{H}_2\mathrm{A}_2\rbrack_{\mathrm{org}} &\overset{k^\mathrm{Na}_{-}}{\underset{k^\mathrm{Na}_{+}}{\rightleftharpoons}} \lbrack \mathrm{Na}(\mathrm{HA}_2)\rbrack_{\mathrm{org}} + [\mathrm{H}^+]_\mathrm{aq}\\
+\end{split}
+(\#eq:sxreactions)
+\end{equation}
+Constraints can then be specified to reduce the number of differential equations which need to be solve and ensure the conservation of mass for the chemical reaction.  We assume that initial concentrations of $\lbrack \mathrm{Na(HA_2)}\rbrack_0$ and $\lbrack \mathrm{La(HA_2)_3}\rbrack_0$ in the organic phase are zero.  The set of constraints, given initial concentrations at time 0 and concentrations at time $T$, is shown in Equation Set \@ref(eq:zeroconst).  For compactness, we remove the $_\mathrm{aq}$ and $_\mathrm{org}$ subscripts in all following equations, but chemical formulas remain consistent.
+\begin{equation}
+\begin{split}
+[ \mathrm{La}^{3+}]_0 &= [ \mathrm{La}^{3+}]_T + [\mathrm{La(HA_2)_3}]_T\\
+[\mathrm{Na}^+]_0 &= [\mathrm{Na}^+]_T + [\mathrm{Na(HA_2)}]_T\\
+[\mathrm{H_2A_2}]_0 &= 3[\mathrm{La(HA_2)_3}]_T + [\mathrm{Na(HA_2)}]_T + [\mathrm{H_2A_2}]_T\\
+[\mathrm{H}^+]_0 + [\mathrm{H_2A_2}]_0 &= [\mathrm{H}^+]_T + [\mathrm{H_2A_2}]_T
+\end{split}
+(\#eq:zeroconst)
+\end{equation}
+\@ref(eq:zeroconst) can be rearranged to solve for $[\mathrm{La(HA_2)_3}]_T, \ [\mathrm{Na(HA_2)}]_T, \ [\mathrm{H_2A_2}]_T, \ \mathrm{and} \ [\mathrm{H}^+]_T$.  Importantly, the concentrations related to the organic phase are difficult or impossible to measure.
+\begin{equation}
+\begin{split}
+[\mathrm{La(HA_2)_3}]_T &= [\mathrm{La}^{3+}]_0 - [ \mathrm{La}^{3+}]_T\\
+[\mathrm{Na(HA_2)}]_T &= [\mathrm{Na}^+]_0 - [\mathrm{Na}^+]_T\\
+[\mathrm{H_2A_2}]_T &= [\mathrm{H_2A_2}]_0 -  3[\mathrm{La(HA_2)_3}]_T - [\mathrm{Na(HA_2)}]_T\\
+[\mathrm{H}^+]_T  &= [\mathrm{H}^+]_0 + [\mathrm{H_2A_2}]_0 - [\mathrm{H_2A_2}]_T
+\end{split}
+(\#eq:diffeqconst)
+\end{equation}
+The constraints stipulated in \@ref(eq:diffeqconst) reduce the number of differential equations which must be solved numerically to two.  These equations are shown in \@ref(eq:diffeq).
+\begin{equation}
+\begin{split}
+\frac{d[\mathrm{La}^{3+}]}{dt} &= k_{+}^{\mathrm{La}}[\mathrm{La(HA_2)}_3]_T[\mathrm{H}^+]_T^3 - k_{-}^{\mathrm{La}}[\mathrm{La}^{3+}]_T[\mathrm{H_2A_2}]_T^3\\
+\frac{d[\mathrm{Na}^{+}]}{dt} &= k_{+}^{\mathrm{Na}}[\mathrm{Na(HA_2)}]_T[\mathrm{H}^+]_T - k_{-}^{\mathrm{Na}}[\mathrm{Na}^{+}]_T[\mathrm{H_2A_2}]_T
+\end{split}
+(\#eq:diffeq)
+\end{equation}
+This set of differential equations was solved using a Runge-Kutta routine where the constraints in \@ref(eq:diffeqconst) were substituted in whenever possible.  A total time of 20 was used with a step size of $5 \times 10^-5$.  Bounds for the chemical kinetic constants were chosen to be $\left[10^{-3}, 10^3\right]$.  
+
+In application, each shake test is simulated as a perfectly mixed solution.  Therefore, although initial concentrations in the aqueous and organic phases are constant, $[\mathrm{La}^{3+}]_0$ and $[\mathrm{H_2A_2}]_0$ will vary with a change in O/A, because original concentrations are normalized to the total volume of the organic phase, aqueous phase, and volume of NaOH solution added.  The inputs to the simulator are mols of NaOH added to the system, volume of NaOH added to the system, and O/A.  Initial pH is taken to be 1.99.  $[\mathrm{H}^+]_0$ is calculated by taking $10^{-1.99}$, multiplying by the aqueous volume to find mols, subtracting the mols of NaOH added, then normalizing to the total volume of the mixture.  If this calculation provides a negative value then $[\mathrm{H}^+]_0$ is set equal to $10^{-14}/(\mathrm{mols \ of \ NaOH} - 10^{-1.99} \times \mathrm{aqueous \ volume})$ normalized by the total mixture volume, Outputs of the simulator are the natural logarithm of $[\mathrm{La}]$ and $[\mathrm{Na}]$ normalized to the total aqueous volume.

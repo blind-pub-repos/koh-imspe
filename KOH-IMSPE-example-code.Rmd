@@ -1,0 +1,543 @@
+---
+title: "Active Learning for Simulator Calibration Test Code"
+date: "2022-12-27"
+output: html_document
+---
+
+# READ-ME
+
+This .Rmd html document is meant to showcase some test code for the paper *Active Learning for Simulator Calibration*, to be viewed by referees and curious readers who find themselves looking through the code repository. 
+Panels from two figures from the publication are *reproduced*.  First, Figure 3 is shown, using the same `set.seed()` setting as was utilized for publication.  Second, 50 of the MC iterations used to build Figure 4 were used.  Comparatively, 1000 were used in publication, but the computation time for this experiment is quite lengthy.  An interested reader can easily edit a single line of code in order to run a similar sized MC experiment.
+
+First, let's load the required packages for compilation, set machine precision, and source KOH-IMSPE related functions created for the publication.
+
+```{r setup, echo = TRUE}
+library(laGP)
+library(plgp)
+library(lhs)
+library(hetGP)
+library(tgp)
+
+eps <- sqrt(.Machine$double.eps)
+
+source("code/koh-imspe.R")
+source("exp/1d-sinusoid/sinusoid-calib.R")
+```
+
+# Figure 3
+
+First defining some of the settings for this set of plots where `min.pts`  = $N_{M_0}$, `pts.add` is a 6 element vector providing values of $N_M - N_{M_0} + 1$ to plot, `field.sd` controls the standard deviation of the noise added to the field data, `unique.field` and `field.reps` define the number of unique field locations and replicates at each location respectively, the number of elements in the grid used for plotting is defined as `grid.length`$^2$, `rndm.strts` indicates the number of initial candidate random starts to use for the gradient based minimization of KOH-IMSPE. The random seed used is 14.
+
+```{r fig3setup, echo = TRUE}
+min.pts <- 10
+pts.add <- c(0, 1, 2, 5, 10, 25) + 1
+field.sd <- 0.2
+unique.field <- 5
+field.reps <- 2
+grid.length <- 100
+rndm.strts <- 500
+
+set.seed(14)
+```
+
+The initial simulator and field data is gathered.
+
+```{r fig3nm0, echo = TRUE}
+# Computer model data
+Xm <- randomLHS(10,2)
+yM <- Comp_Model(Xm[,1],Xm[,2])
+Xm.init <- Xm
+
+#Field data
+Xf <- matrix(seq(from = 0, to = 1, length.out = unique.field), ncol= 1, nrow=  unique.field)
+Xf <- rbind(Xf,Xf)
+yF <- drop(Field(Xf, sd = field.sd))
+```
+
+Some additional setup is below, including fitting the initial computer model and bias GPs.
+
+```{r fig3addtlsetup, echo = TRUE}
+candidate <- FALSE
+log.IMSPE <- TRUE
+
+x <- seq(from = 0, to = 1, length.out = grid.length)
+XX <- expand.grid(x,x)
+
+type <- "Gaussian"
+
+if(type %in% "Gaussian"){
+    W11.fn <- W11.gaussian
+    W12.fn <- W12.gaussian
+    W11.xtilde <- W11.xtilde.gaussian
+    W12.xtilde <- W12.xtilde.gaussian
+}else{
+    stop("Only Gaussian (with a capital G) covariance functions are currently available for KOH-IMSPE")
+  }
+
+tests <- c(min.pts,pts.add[length(pts.add)] + min.pts)
+
+twodplot.vals <- list()
+previous.params <- NULL
+
+fits <- GP_Fits(Xm = Xm, yM = yM, Xf = Xf, yF = yF, eps = eps)
+    
+Vb <- fits$tau2B
+Vm <- fits$tau2M
+theta_m <- fits$LS.M
+theta_b <- fits$LS.B
+gb <- fits$Nug.B
+uhat <- fits$uhat
+
+previous.params <- list(theta_m = theta_m, theta_b = theta_b, gb = gb)
+```
+
+The sequential design is then run, and for the $N_M$ specified by `pts.add` the necessary data for plotting is collected.
+
+```{r fig3sequential, echo = TRUE, cache = TRUE}
+for(pt.add in 1:max(pts.add)){
+  
+
+xtilde <- IMSPE.optim(Xm = Xm, Xf = Xf, uhat = uhat, Vb = Vb, Vm = Vm,
+                          theta_m = theta_m, theta_b = theta_b,gb = gb,
+                          type = "Gaussian", starts = rndm.strts, eps = eps, 
+                      candidate = candidate, log.IMSPE = log.IMSPE, optim.control = list(pgtol = 0.02, trace = 0, lmm = 13))
+
+if(pt.add %in% pts.add){
+
+nm <- nrow(Xm)
+  nf <- nrow(Xf)
+
+  
+  Xfm <- rbind(cbind(Xf,rep(1, nrow(Xf)) %x% t(uhat)), Xm)
+  Xfuhat <- Xfm[1:nf,]
+  Km <- cov_gen(Xfm, theta = theta_m, type = type)
+  Km <- Vm*(Km + diag(nrow(Km))*eps)
+  
+  Km[1:nf,1:nf] <- Km[1:nf,1:nf] + (Vb)*(cov_gen(Xf, theta = theta_b, type = type) + diag(nf)* gb)
+  
+  Ki <- solve(Km)
+  
+  Ki <- (Ki + t(Ki))/2
+  
+  W11_mr1 <- W11.fn(Xf = Xf, uhat = uhat, Xm = Xm, theta_m=  theta_m, type = type)
+  W12 <- W12.fn(Xf = Xf, uhat = uhat, Xm = Xm, theta_m=  theta_m, theta_b = theta_b, Xfuhat = Xfuhat, type = type)
+  W22 <- matrix(0, nrow = nrow(Xf) + nrow(Xm) + 1, ncol = nrow(Xf) + nrow(Xm) + 1)
+  W22[1:nrow(Xf), 1:nrow(Xf)] <- hetGP::Wij(mu1 = Xf, theta = theta_b, type =type)
+  
+  params <- list()
+  params$Xm <- Xm
+  params$Xf <- Xf
+  params$Ki <- Ki
+  params$W11_mr1 <- W11_mr1
+  params$W12 <- W12
+  params$W22 <- W22
+  params$type <- type
+  params$eps <- eps
+  params$Vm <- Vm
+  params$Vb <- Vb
+  params$theta_m <- theta_m
+  params$theta_b <- theta_b
+  params$uhat <- uhat
+  params$Km <- Km
+  params$log.IMSPE <- log.IMSPE
+  params$Xfuhat <- Xfuhat
+  params$Xfm <- Xfm
+
+  
+  params.cand <- params
+  params.cand$log.IMSPE <- FALSE
+  
+  imspes <- apply(XX,1,IMSPE.obj, params = params.cand)
+
+  Xm.init <- Xm[1:min.pts,]
+  
+  temp.list <- list()
+  temp.list$imspes <- imspes
+  temp.list$uhat <- uhat
+  temp.list$Xm.init <- Xm.init
+  temp.list$xtilde <- xtilde
+  temp.list$Xm <- Xm
+  
+  twodplot.vals[[pt.add]] <- temp.list
+
+}
+
+Xm <- rbind(Xm,xtilde)
+      
+yM <- Comp_Model(Xm[,1],Xm[,2])
+
+fits <- GP_Fits(Xm = Xm, yM = yM, Xf = Xf, yF = yF, eps = eps, previous.params = previous.params)
+        
+Vb <- fits$tau2B
+Vm <- fits$tau2M
+theta_m <- fits$LS.M
+theta_b <- fits$LS.B
+gb <- fits$Nug.B
+uhat <- fits$uhat
+
+previous.params <- list(theta_m = theta_m, theta_b = theta_b, gb = gb)
+
+
+}
+
+```
+
+Then, plots are generated:
+
+```{r fig3plt, echo = TRUE}
+cex.factor <- 0.7
+
+layout.mat <- matrix(c(7,7,7,9,9, 1,3,5,8,10, 2,4,6,8,10), ncol = 3, nrow = 5)
+rmar.7 <- 0.15
+rmar.8 <- 0.3
+layout(mat = layout.mat, heights = c(1,1,1,rmar.8, rmar.8*0.8), widths = c(rmar.7, 1,1))
+
+mar.mat <- matrix(1, ncol = 5, nrow = length(pts.add))
+mar.mat[,1] <- pts.add
+
+mar.mat[,4+1] <- mar.mat[, 4+1] + rep(c(0.05, 0), times= 3)
+mar.mat[, 2+1] <- mar.mat[, 2 + 1] + rep(c(0,0.05), times = 3)
+
+
+### logical matrix providing if X and Y axis labels should be included
+axis.mat <- matrix(NA, ncol = 2, nrow = length(pts.add))
+axis.mat[,1] <- c(rep(FALSE, times = 4), rep(TRUE, times = 2))
+axis.mat[,2] <- rep(c(TRUE, FALSE), times = 3)
+
+
+
+for(pt.add in pts.add){
+  
+  temp.list <- twodplot.vals[[pt.add]]
+  
+  imspes <- temp.list$imspes
+  uhat <- temp.list$uhat
+  Xm.init <- temp.list$Xm.init
+  xtilde <- temp.list$xtilde
+  Xm <- temp.list$Xm
+  
+  par(mar = mar.mat[which(pts.add %in% pt.add),-1], cex = cex.factor, xpd = NA, cex.axis = 0.9) 
+  if(axis.mat[which(pts.add %in% pt.add), 1]){
+    x.lab <- "X"
+    x.axt <- "s"
+  }else{
+    x.lab <- ""
+    x.axt <- "n"
+  }
+  
+  if(axis.mat[which(pts.add == pt.add), 2]){
+    y.lab <- "U"
+    y.axt <- "s"
+  }else{
+    y.lab <- ""
+    y.axt <- "n"
+  }
+  
+  image(x, x,z=matrix(imspes, ncol=grid.length),xlab="",ylab= "",
+        col=heat.colors(128), main="", xaxt = x.axt, yaxt = y.axt)
+  title(ylab = y.lab, line = 2.25)
+  title(xlab = x.lab, line = 2.25)
+  
+  
+  lines(seq(from=  0, to = 1, length.out = 100), rep(pi/5, times = 100), col = "grey")
+  points(Xf, rep(uhat, times=  nrow(Xf)), pch = 4)
+  points(Xm.init[,1], Xm.init[,2], pch = 20)
+  points(xtilde[1], xtilde[2], pch = 8)
+  
+  if(pt.add != 1){
+    Xm.addtl <- Xm[(min.pts + 1):(min.pts + pt.add -1), , drop = FALSE]
+    points(Xm.addtl[,1], Xm.addtl[,2], pch = 18, col = "blue")
+  }
+  
+  text(0.925, 0.085, labels = bquote(N[M] == .(pt.add -1 + min.pts)))
+  
+}
+plot(1, type = "n", axes = FALSE, xlab = "", ylab = "")
+plot(1, type = "n", axes = FALSE, xlab = "", ylab = "")
+
+par(mar = c(0.001, 0.001, 0.001, 0.001))
+plot(1, type = "n", axes = FALSE, xlab = "", ylab = "")
+
+par(mar=c(0.1,2,0.5,2), xpd=NA, cex = cex.factor)
+plot(1, type = "n", axes = FALSE, xlab = "", ylab = "")
+legend(x = "right", inset = c(-0.05,0.05), 
+       legend = c(as.expression("Initial" ~ X[N[M]] * ", " * U[N[M]]),
+                  "IMSPE acquisition", "Min IMSPE",
+                  as.expression(bquote(X[N[F]] * ", " * hat(u))),
+                  as.expression(bquote(u * "*"))), 
+       lty = c(NA, NA, NA, NA, 1), 
+       col = c("black", "blue", "black", "black","grey"), 
+       pch = c(20, 18, 8, 4, NA), horiz = TRUE)
+```
+
+# Figure 4
+
+The chunk below sets up the parameters for the MC experiment conducted for generating Figure 4.  However, in order to make the computation time reasonable (about 20 minutes on a 2021 Apple M1 Pro processor) some parameters have been changed.  The original parameters used for the MC experiment within the publication are commented out below the values utilized in this document.
+
+Some of the variables below are described in the previous section.  For the variables not described `mc.iters` controls the total number of experiments run for the Monte Carlo simulation and `max.pts` denotes the size of the final design for each method.  `candidate` is a logical used to denote if only a candidate set is used for optimization, where `candidate == FALSE` means that local optimization through `optim()` is utilized further minimize KOH-IMSPE for a subset of the best of a LHS candidate set.  `log.IMSPE` is a logical where `log.IMSPE == TRUE` indicates that, for KOH-IMSPE, the objective fed to `optim()` is $\log(\mathrm{KOH-IMSPE})$.  `iter.use` indicates the value of $N_M$ used for plotting the boxplot in the figure generated after running the MC experiment.
+
+```{r mcsetup, echo = TRUE, cache = TRUE}
+field.sd <- 0.1
+unique.field <- 5
+field.reps <- 2
+min.pts <- 15
+# min.pts <- 10
+rndm.strts <- 250
+# rndm.strts <- 500
+
+mc.iters <- 100
+# mc.iters <- 1000
+max.pts <- 50
+
+candidate <- FALSE
+log.IMSPE <- TRUE
+
+iter.use <- 25
+```
+
+The code chunk below then runs the MC experiment using the above parameters for KOH-IMSPE, LHS, uniformly random, and IMSPE experimental designs.  After each computer model point is added, RMSE on a 100 point hold out set is calculated and saved.
+
+```{r fig4mc, echo = TRUE, cache = TRUE}
+set.seed(NULL)
+
+
+deleteGPs()
+deleteGPseps()
+
+test.types <- c("imspe", "lhs", "random", "m-imspe")
+
+param.rec <- matrix(NA, ncol=  mc.iters, nrow = max.pts)
+
+performance.list <- list()
+list.temp <- list()
+
+list.temp$rmse <- param.rec
+list.temp$uhat <- param.rec
+
+theta_m.list <- theta_b.list <- list()
+
+for(i in 1:mc.iters){
+  theta_m.list[[i]] <- matrix(NA, ncol = 2, nrow = max.pts)
+  theta_b.list[[i]] <- matrix(NA, ncol = 1, nrow = max.pts)
+}
+
+list.temp$gb <- param.rec
+list.temp$Vb <- param.rec
+list.temp$Vm <- param.rec
+list.temp$theta_m <- theta_m.list
+list.temp$theta_b <- theta_b.list
+
+for(i in test.types){
+  performance.list[[i]] <- list.temp
+}
+
+for(i in 1:mc.iters){
+  
+  ## Training Data
+  
+  model.pts <- min.pts
+ 
+  Xm.full <- randomLHS(n= max.pts, k = 2)
+  
+  Xm <- Xm.full[1:model.pts, ,drop = FALSE]
+  
+  #Computer Model Evaluations
+  yM <- Comp_Model(Xm[,1],Xm[,2])
+  #Field Data
+  Xf <- matrix(seq(from = 0, to = 1, length.out = unique.field), ncol= 1, nrow=  unique.field)
+  Xf <- rbind(Xf,Xf)
+  
+  #Field Observations
+  yF <- drop(Field(Xf, sd = field.sd))
+  
+  ## Testing Data
+  Xf.test <- randomLHS(n = 100, k = 1)
+  yF.true.test <-  drop(Field(Xf.test,sd = 0))
+  
+  previous.params <- NULL
+  fits <- GP_Fits(Xm = Xm, yM = yM, Xf = Xf, yF = yF, eps = eps)
+    
+  initial.vals <- list(Xm = Xm, yM = yM, Xf = Xf, yF = yF, Vb = fits$tau2B, 
+                       Vm = fits$tau2M, theta_m = fits$LS.M, theta_b = fits$LS.B, 
+                       gb = fits$Nug.B, uhat = fits$uhat)
+  
+  initial.vals <- list(Xm = Xm, yM = yM, Xf = Xf, yF = yF, 
+                         Vb = Vb, Vm = Vm, theta_m = theta_m, theta_b = theta_b, 
+                       gb = gb, uhat = uhat)
+
+  rndm.tests <- matrix(runif(2*max.pts), ncol = 2, nrow = max.pts)
+  lhs.tests <- Xm.full[(min.pts +1):max.pts, , drop = FALSE]
+  
+  
+  ## Iterate over scenarios
+  for(s in test.types){
+
+    Xm <- initial.vals$Xm
+    yM <- initial.vals$yM
+    
+    #Computer Model Evaluations
+    
+    Xf <- initial.vals$Xf
+    yF <- initial.vals$yF
+    
+    Vb <- initial.vals$Vb
+    Vm <- initial.vals$Vm
+    theta_m <- initial.vals$theta_m
+    theta_b <- initial.vals$theta_b
+    gb <- initial.vals$gb
+    uhat <- initial.vals$uhat
+    
+    previous.params <- list(theta_m = theta_m, theta_b = theta_b, gb = gb)
+
+    current.perf <- rmse.score.fn(Xm = Xm, yM = yM, Xf = Xf, yF = yF, uhat = uhat, Vm = Vm, Vb = Vb, 
+                                  theta_m = theta_m, theta_b = theta_b, gb = gb, Xf.test = Xf.test, 
+                                  yF.true.test = yF.true.test, eps = eps)
+    
+    performance.list[[s]]$rmse[min.pts,i] <- current.perf$rmse
+    performance.list[[s]]$uhat[min.pts,i] <- uhat
+    performance.list[[s]]$theta_m[[i]][min.pts,] <- theta_m
+    performance.list[[s]]$theta_b[[i]][min.pts,] <- theta_b
+    performance.list[[s]]$gb[min.pts,i] <- gb
+    performance.list[[s]]$Vb[min.pts,i] <- Vb
+    performance.list[[s]]$Vm[min.pts,i] <- Vm
+    
+    
+    
+    ## Iterate over added points
+    
+    
+    for(j in (min.pts+1):max.pts){
+      
+      if(s == "random"){
+        xtilde <- rndm.tests[j,]
+      }else if(s == "imspe"){
+        xtilde <- IMSPE.optim(Xm = Xm, Xf = Xf, uhat = uhat, Vb = Vb, Vm = Vm,
+                              theta_m = theta_m, theta_b = theta_b,gb = gb,
+                              type = "Gaussian", starts = rndm.strts, eps = eps, 
+                              candidate = candidate, log.IMSPE = log.IMSPE,
+                              optim.control = list(pgtol = 0.1))
+      }else if(s == "lhs"){
+        xtilde <- lhs.tests[j-min.pts,]
+      }else if(s == "m-imspe"){
+        hgp <- mleHomGP(X = Xm, Z = yM, known = list(theta = theta_m, g = eps), covtype = "Gaussian",
+                        maxit = 0, settings = list(return.Ki = TRUE))
+        
+        xtilde <- IMSPE_optim(model = hgp, h = 0)$par
+        set.seed(NULL)
+      }
+      
+      Xm <- rbind(Xm,xtilde)
+      rownames(Xm) <- NULL
+      
+      yM <- Comp_Model(Xm[,1],Xm[,2])
+      yM <- unname(yM)
+      
+      fits <- GP_Fits(Xm = Xm, yM = yM, Xf = Xf, yF = yF, eps = eps, previous.params = previous.params)
+        
+      Vb <- fits$tau2B
+      Vm <- fits$tau2M
+      theta_m <- fits$LS.M
+      theta_b <- fits$LS.B
+      gb <- fits$Nug.B
+      uhat <- fits$uhat
+        
+      previous.params <- list(theta_m = theta_m, theta_b = theta_b, gb = gb)
+    
+      current.perf <- rmse.score.fn(Xm = Xm, yM = yM, Xf = Xf, yF = yF, 
+                                    uhat = uhat, Vm = Vm, Vb = Vb, theta_m = theta_m,
+                                    theta_b = theta_b, gb = gb, Xf.test = Xf.test, 
+                                    yF.true.test = yF.true.test, eps = eps)
+      
+      performance.list[[s]]$rmse[j,i] <- current.perf$rmse
+      performance.list[[s]]$uhat[j,i] <- uhat
+      performance.list[[s]]$theta_m[[i]][j,] <- theta_m
+      performance.list[[s]]$theta_b[[i]][j,] <- theta_b
+      performance.list[[s]]$gb[j,i] <- gb
+      performance.list[[s]]$Vb[j,i] <- Vb
+      performance.list[[s]]$Vm[j,i] <- Vm
+      
+      if(j == max.pts){
+        performance.list[[s]]$data[[i]] <- list(Xm = Xm, Xf = Xf, yM = yM, yF = yF, yF.true.test = yF.true.test, Xf.test = Xf.test)
+      }
+      
+    }
+    
+  }
+  
+  
+}
+```
+
+The recorded RMSE is then used to calculate mean RMSE and the bounds of 90\% quantiles to generate the plots below.
+
+```{r sinusoidsrmse, echo = FALSE}
+tests <- c("imspe", "lhs", "random", "m-imspe")
+
+col.pals <- data.frame(imspe = "YlGn", lhs = "PuBu", random = "Oranges")
+col.pals[["m-imspe"]] <- "PuRd"
+
+col.index <- 45
+
+col.bank <- c(hcl.colors(100, palette = col.pals$imspe)[col.index], hcl.colors(100, palette = col.pals$lhs)[col.index],
+               hcl.colors(100, palette = col.pals$random)[col.index],  hcl.colors(100, palette = col.pals$`m-imspe`)[col.index])
+faded.col.bank <-  c(hcl.colors(100, palette = col.pals$imspe, alpha = 0.2)[col.index], 
+                     hcl.colors(100, palette = col.pals$lhs, alpha = 0.2)[col.index],
+                     hcl.colors(100, palette = col.pals$random, alpha = 0.2)[col.index],  
+                     hcl.colors(100, palette = col.pals$`m-imspe`, alpha = 0.2)[col.index])
+
+param <- "rmse"
+
+include.quantile <- TRUE
+
+lower.quantile <- upper.quantile <- mean.vals <- data.frame(matrix(NA, ncol = length(tests), nrow = max.pts))
+names(mean.vals) <- names(lower.quantile) <- names(upper.quantile) <- tests
+
+for(i in tests){
+temp.mean <- apply(performance.list[[i]][[param]],1,function(X){mean(X, na.rm = TRUE)})
+temp.quant <- apply(performance.list[[i]][[param]],1, function(X){quantile(X, probs = c(0.05,0.95), na.rm = TRUE)})
+mean.vals[[as.character(i)]] <- temp.mean
+lower.quantile[[as.character(i)]] <- temp.quant[1,]
+upper.quantile[[as.character(i)]] <- temp.quant[2,]
+}
+
+if(include.quantile){
+y.lim <- range(cbind(lower.quantile, upper.quantile),na.rm = TRUE)
+}else{
+  y.lim <- range(mean.vals, na.rm = TRUE)
+}
+
+layout(mat = matrix(1:2, ncol = 2, nrow = 1), widths = c(0.6,0.3))
+
+par(mar = c(4.8,4.3,2,1.5), cex = 0.8, cex.axis = 0.8, cex.lab = 0.9)
+plot(1, type = "n", xlab = bquote("Model Design Size, " * N[M]), ylab = "RMSE", xlim = c(min.pts,max.pts), ylim = y.lim)
+
+if(include.quantile){
+for(i in 1:length(tests)){
+ polygon(x = c(1:max.pts, max.pts:1), y = c(lower.quantile[,i], upper.quantile[,i][nrow(upper.quantile):1]), 
+         border = NA, col = faded.col.bank[i])
+}
+}
+
+for(i in 1:length(tests)){
+lines(x = 1:max.pts, y = mean.vals[,i], col = col.bank[i])
+}
+
+############
+### Boxplot
+##############
+
+
+abline(v = iter.use, lty = 3)
+
+box.df <- data.frame(matrix(NA, ncol = length(tests), nrow =mc.iters*length(iter.use)))
+names(box.df) <- tests
+
+for(i in tests){
+
+  box.df[[as.character(i)]] <- as.vector(performance.list[[i]][[param]][iter.use,1:mc.iters])
+
+}
+
+par(mar = c(4.8,4.2,2,0.8))
+boxplot(box.df, main = "", xlab = "", ylab = bquote("RMSE, " * N[M] == .(iter.use)), col = col.bank, names =c("KOH\nIMSPE","LHS","Random", "Model\nIMSPE"),las = 2, log = "y")
+```

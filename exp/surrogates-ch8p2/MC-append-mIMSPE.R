@@ -5,17 +5,14 @@
 ### existing MC experiment
 #######
 {
-  if(any(Sys.info()[4] %in% c("Scotts-MacBook-Pro-2.local","Scotts-MacBook-Pro.local", "Scotts-MBP"))){
+  if(Sys.getenv("RSTUDIO") == 1){
     setwd(dirname(rstudioapi::getActiveDocumentContext()$path))
-    file.path <- "~/Documents/gramacy-lab/kohdesign/exp/surrogates-ch8p2/"
+    expwd <- getwd()
   }else if(Sys.info()[4] == "mordor"){
     .libPaths(new = "~/Rmkl_libs")
-    file.path <- "~/scott-docs/koh-imspe/kohdesign/exp/surrogates-ch8p2/"
-  }else if(Sys.info()[4] == "pn2294866.lanl.gov"){
-    setwd(dirname(rstudioapi::getActiveDocumentContext()$path))
-    file.path <- "~/Documents/PhD Work/gramacy-lab/kohdesign/exp/surrogates-ch8p2/"
+    expwd <- getwd()
   }else{
-    stop("Sys.info related variables not set correctly")
+    expwd <- getwd()
   }
   
   library(PeriodicTable)
@@ -141,10 +138,11 @@ IMSPE.search <- function (model, replicate = FALSE, Xcand = NULL, control = list
 source("surrogates-8-2-calib.R")
 setwd("./../../")
 source("code/koh-imspe.R")
+setwd(expwd)
   
   previous.file <- "04-07-2022-surrogates-100reps.RData"
   previous.file.short <- "04-07-2022-surrogates-100reps"
-  previous.file <- file.name <- paste(file.path, previous.file, sep=  "")
+  file.name <- previous.file
   
   load(previous.file)
   previous.data <- performance.list
@@ -167,8 +165,6 @@ source("code/koh-imspe.R")
   type <- "Gaussian"
   
   file.name <- paste(previous.file.short,"-appended.RData", collapse = "", sep = "")
-  
-  file.name <- paste(file.path, file.name, sep=  "")
   
   notes <- "attempting to append additional tests"
   

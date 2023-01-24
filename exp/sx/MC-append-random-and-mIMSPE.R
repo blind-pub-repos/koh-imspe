@@ -6,17 +6,14 @@
 #######
 
 {
-  if(any(Sys.info()[4] %in% c("Scotts-MacBook-Pro-2.local","Scotts-MacBook-Pro.local", "Scotts-MBP"))){
+  if(Sys.getenv("RSTUDIO") == 1){
     setwd(dirname(rstudioapi::getActiveDocumentContext()$path))
-    file.path <- "~/Documents/gramacy-lab/kohdesign/exp/sx/"
+    expwd <- getwd()
   }else if(Sys.info()[4] == "mordor"){
     .libPaths(new = "~/Rmkl_libs")
-    file.path <- "~/scott-docs/koh-imspe/kohdesign/exp/sx/"
-  }else if(Sys.info()[4] == "pn2294866.lanl.gov"){
-    setwd(dirname(rstudioapi::getActiveDocumentContext()$path))
-    file.path <- "~/Documents/PhD Work/gramacy-lab/kohdesign/exp/sx/"
+    expwd <- getwd()
   }else{
-    stop("Sys.info related variables not set correctly")
+    expwd <- getwd()
   }
   
   library(PeriodicTable)
@@ -211,11 +208,12 @@
   source("sx-calib.R")
   setwd("./../../")
   source("code/koh-imspe.R")
+  setwd(expwd)
   #source("code/koh-imspe-nobias.R")
   
   previous.file <- "2022-11-07-sx-200-reps.RData"
   previous.file.short <- "2022-11-07-sx-200-reps"
-  previous.file <- file.name <- paste(file.path, previous.file, sep=  "")
+  file.name <- previous.file
   
   load(previous.file)
   previous.data <- performance.list
@@ -248,8 +246,6 @@
   type <- "Gaussian"
   
   file.name <- paste(previous.file.short,"-appended.RData", collapse = "", sep = "")
-  
-  file.name <- paste(file.path, file.name, sep=  "")
   
   notes <- "attempting to append additional tests"
   

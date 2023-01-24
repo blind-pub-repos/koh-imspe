@@ -1,24 +1,21 @@
 #!/usr/bin/env Rscript
 
 {
-if(any(Sys.info()[4] %in% c("Scotts-MacBook-Pro-2.local", "Scotts-MBP"))){
+  if(Sys.getenv("RSTUDIO") == 1){
     setwd(dirname(rstudioapi::getActiveDocumentContext()$path))
-    file.path <- "~/Documents/gramacy-lab/kohdesign/exp/sx/"
-}else if(Sys.info()[4] == "mordor"){
-  .libPaths(new = "~/Rmkl_libs")
-  file.path <- "~/scott-docs/koh-imspe/kohdesign/exp/surrogates-ch8p2/"
-}else if(Sys.info()[4] == "pn2294866.lanl.gov"){
-  setwd(dirname(rstudioapi::getActiveDocumentContext()$path))
-  file.path <- "~/Documents/PhD Work/gramacy-lab/kohdesign/exp/surrogates-ch8p2/"
+    expwd <- getwd()
+  }else if(Sys.info()[4] == "mordor"){
+    .libPaths(new = "~/Rmkl_libs")
+    expwd <- getwd()
   }else{
-    stop("Sys.info related variables not set correctly")
+    expwd <- getwd()
   }
-
-
+  
 
 source("surrogates-8-2-calib.R")
 setwd("./../../")
 source("code/koh-imspe.R")
+setwd(expwd)
 
 
 library(laGP)
@@ -52,8 +49,6 @@ uhat.starts <- 10
 sep <- TRUE
 
 file.name <- "01-19-2023-surrogates-100reps.RData"
-
-file.name <- paste(file.path, file.name, sep=  "")
 
 notes <- "fixed an error with the random design"
 

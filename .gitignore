@@ -20,6 +20,7 @@ KOH-IMSPE-example-code_files/
 *.Rds
 *.html
 *.xlsx
+*.zip
 
 # Compiled Java class files
 *.class

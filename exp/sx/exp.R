@@ -3,17 +3,14 @@
 ## Some data manipulation and getting the model in order
 
 {
-  if(any(Sys.info()[4] %in% c("Scotts-MacBook-Pro-2.local", "Scotts-MBP"))){
+  if(Sys.getenv("RSTUDIO") == 1){
     setwd(dirname(rstudioapi::getActiveDocumentContext()$path))
-    file.path <- "~/Documents/gramacy-lab/kohdesign/exp/sx/"
+    expwd <- getwd()
   }else if(Sys.info()[4] == "mordor"){
     .libPaths(new = "~/Rmkl_libs")
-    file.path <- "~/scott-docs/koh-imspe/kohdesign/exp/sx/"
-  }else if(Sys.info()[4] == "pn2294866.lanl.gov"){
-    setwd(dirname(rstudioapi::getActiveDocumentContext()$path))
-    file.path <- "~/Documents/PhD Work/gramacy-lab/kohdesign/exp/sx/"
+    expwd <- getwd()
   }else{
-    stop("Sys.info related variables not set correctly")
+    expwd <- getwd()
   }
   
   library(PeriodicTable)
@@ -201,6 +198,7 @@
   source("sx-calib.R")
   setwd("./../../")
   source("code/koh-imspe.R")
+  setwd(expwd)
   
   mc.iters <- 200
   min.pts <- 50
@@ -229,7 +227,6 @@
   
   file.name <- paste(Sys.Date(), "-sx-",mc.iters,"-reps.RData", collapse = "", sep = "")
   
-  file.name <- paste(file.path, file.name, sep=  "")
   
   notes <- "priors with less weird values, start at 5 points, smaller sd"
   

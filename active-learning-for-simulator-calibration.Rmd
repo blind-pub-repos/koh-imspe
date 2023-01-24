@@ -44,11 +44,10 @@ sx.experiment1 <- "2022-11-14-sx-200-reps-appended.RData"
 sx.experiment2 <- "2022-11-19-sx-200-reps-appended.RData"
 sx.experiment3 <- "2022-12-04-sx-100-reps-appended.RData"
 
-if(Sys.info()[4] == "scott-XPS-15-9560" || Sys.info()[4] %in% c("rhudaur", "rivendell")){
-  opts_chunk$set(cache.path = "~/Documents/gramacy_lab/KOHdesign/pubdocs/cache/")
-  opts_chunk$set(fig.path = "~/Documents/gramacy_lab/KOHdesign/pubdocs/figs/")
+opts_chunk$set(cache.path = "pubdocs/cache/")
+opts_chunk$set(fig.path = "pubdocs/figs/")
   
-  ### Set the path for the sinusoid experiment data file
+### Set the path for the sinusoid experiment data file
   load(paste("exp/1d-sinusoid/",sinusoid.experiment, sep = "")) 
   sinusoid.data <- performance.list
   
@@ -63,36 +62,8 @@ if(Sys.info()[4] == "scott-XPS-15-9560" || Sys.info()[4] %in% c("rhudaur", "rive
   sx.data2 <- performance.list
   load(paste("exp/sx/", sx.experiment3, sep =""))
   sx.data3 <- performance.list
-  
-}else if(Sys.info()[4] %in% c("Scotts-MacBook-Pro-2.local", "Scotts-MBP", "Scotts-MacBook-Pro.local", "DESKTOP-RFPNN23")){
-  
-  opts_chunk$set(cache.path = "~/Documents/gramacy-lab/KOHdesign/pubdocs/cache/")
-  opts_chunk$set(fig.path = "~/Documents/gramacy-lab/KOHdesign/pubdocs/figs/")
-  
-  ### Set the path for the sinusoid experiment data file
-  load(paste("exp/1d-sinusoid/",sinusoid.experiment, sep = "")) 
-  sinusoid.data <- performance.list
-  
-  ## Set the path for the surrogates ch8 problem 2 experiment
-  load(paste("exp/surrogates-ch8p2/",surrogatesHW.experiment, sep =""))
-  surrogatesHW.data <- performance.list
-  
-  ## Set the path for the real SX application
-  load(paste("exp/sx/", sx.experiment1, sep =""))
-  sx.data1 <- performance.list
-  load(paste("exp/sx/", sx.experiment2, sep =""))
-  sx.data2 <- performance.list
-  load(paste("exp/sx/", sx.experiment3, sep =""))
-  sx.data3 <- performance.list
-  
-}else if(Sys.info()[4] == "some_system"){
-  
-  stop("Set cache and figure path for your system in first Rmd code chunk")
-  
 
-}else{
-    stop("Set cache and figure path for your system in first Rmd code chunk")
-  }
+
 
 
 eps <- sqrt(.Machine$double.eps)

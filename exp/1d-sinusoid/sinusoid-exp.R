@@ -1,23 +1,22 @@
 #!/usr/bin/env Rscript
 
 {
-  if(Sys.info()[4] == "scott-XPS-15-9560"){
+  
+  if(Sys.getenv("RSTUDIO") == 1){
     setwd(dirname(rstudioapi::getActiveDocumentContext()$path))
-    file.path <- "~/Documents/gramacy_lab/KOHdesign/kohdesign/exp/1d-sinusoid/"
+    expwd <- getwd()
   }else if(Sys.info()[4] == "mordor"){
     .libPaths(new = "~/Rmkl_libs")
-    file.path <- "~/scott-docs/koh-imspe/kohdesign/exp/1d-sinusoid/"
-  }else if(any(Sys.info()[4] %in% c("Scotts-MacBook-Pro-2.local","Scotts-MacBook-Pro.local", "Scotts-MBP"))){
-    setwd(dirname(rstudioapi::getActiveDocumentContext()$path))
-    file.path <- "~/Documents/gramacy-lab/kohdesign/exp/1d-sinusoid/"
+    expwd <- getwd()
   }else{
-    stop("Sys.info related variables not set correctly")
+    expwd <- getwd()
   }
   
 
 source("sinusoid-calib.R")
 setwd("./../../")
 source("code/koh-imspe.R")
+setwd(expwd)
 
 
 library(laGP)
@@ -43,10 +42,9 @@ field.reps <- 2
 deleteGPs()
 deleteGPseps()
 
+## name for the output data file
 
 file.name <- "11-18-2022-sinusoid-1000reps.RData"
-
-file.name <- paste(file.path, file.name, sep=  "")
 
 notes <- "code submission version"
 

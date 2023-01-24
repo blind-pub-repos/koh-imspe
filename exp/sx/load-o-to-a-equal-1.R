@@ -2,8 +2,6 @@
 ### SCRIPT FOR LOADING DATA WITH O/A OF 1
 #########
 
-setwd(dirname(rstudioapi::getActiveDocumentContext()$path))
-
 eps <- sqrt(.Machine$double.eps)
 
 #############################################################################
